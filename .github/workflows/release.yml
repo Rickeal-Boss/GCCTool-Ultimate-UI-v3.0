@@ -99,7 +99,6 @@ jobs:
           cp ${{ matrix.output_debug }} release/
           cp data.json release/
           cp README.md release/
-          cp QUICKSTART.md release/
           
           # Create platform-specific archive
           if [ "${{ matrix.goos }}" = "windows" ]; then
