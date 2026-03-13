@@ -1,0 +1,7 @@
+# go.sum will be generated automatically by 'go mod tidy'
+# This file should not be edited manually
+
+github.com/fyne-io/fyne/v2 v2.4.5 h1:...
+github.com/fyne-io/fyne/v2 v2.4.5/go.mod h1:...
+
+# Run 'go mod tidy' to generate actual checksums
