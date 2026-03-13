@@ -46,39 +46,14 @@ jobs:
           go build -v -ldflags="-s -w -H windowsgui" -o gcc_helper.exe .
           go build -v -ldflags="-s -w" -o gcc_helper_debug.exe .
 
-      - name: Create release archive
-        run: |
-          New-Item -ItemType Directory -Force -Path release
-          Copy-Item gcc_helper.exe release\
-          Copy-Item gcc_helper_debug.exe release\
-          Copy-Item data.json release\
-          Copy-Item README.md release\
-          Copy-Item QUICKSTART.md release\
-          Compress-Archive -Path release\* -DestinationPath gcc_helper_v3.0.0_windows.zip
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: gcc-helper-windows-exe
           path: |
-            gcc_helper_v3.0.0_windows.zip
             gcc_helper.exe
             gcc_helper_debug.exe
           retention-days: 30
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            gcc_helper_v3.0.0_windows.zip
-            gcc_helper.exe
-            gcc_helper_debug.exe
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Display build info
         run: |
