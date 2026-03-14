@@ -1,0 +1,153 @@
+GCC 选课助手 V3.0
+Copyright (c) 2026 Rickeal-Boss
+
+本项目基于原版 GCCTool（V2.0）进行全面重构，V3.0 由作者本人完全重写。
+原始版本版权归其原始作者所有。
+
+================================================================================
+
+本项目使用了以下开源软件，特此致谢并声明其许可证信息：
+
+--------------------------------------------------------------------------------
+1. Fyne
+   Copyright (c) 2018 Fyne.io
+   License: BSD 3-Clause License
+   Source:  https://github.com/fyne-io/fyne
+   Version: v2.5.3
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions are met:
+   1. Redistributions of source code must retain the above copyright notice,
+      this list of conditions and the following disclaimer.
+   2. Redistributions in binary form must reproduce the above copyright notice,
+      this list of conditions and the following disclaimer in the documentation
+      and/or other materials provided with the distribution.
+   3. Neither the name of the copyright holder nor the names of its contributors
+      may be used to endorse or promote products derived from this software
+      without specific prior written permission.
+
+--------------------------------------------------------------------------------
+2. clipboard (atotto/clipboard)
+   Copyright (c) 2013 Ato Araki
+   License: BSD 3-Clause License
+   Source:  https://github.com/atotto/clipboard
+   Version: v0.1.4
+
+--------------------------------------------------------------------------------
+3. Go (golang.org/x/*)
+   Copyright (c) 2009 The Go Authors
+   License: BSD 3-Clause License
+   Source:  https://golang.org/x/
+
+   Packages used:
+   - golang.org/x/image
+   - golang.org/x/mobile
+   - golang.org/x/net
+   - golang.org/x/sys
+   - golang.org/x/text
+
+--------------------------------------------------------------------------------
+4. go-gl/gl
+   Copyright (c) 2014 The go-gl Authors
+   License: MIT License
+   Source:  https://github.com/go-gl/gl
+
+--------------------------------------------------------------------------------
+5. go-gl/glfw
+   Copyright (c) 2012 The go-gl Authors
+   License: BSD 3-Clause License
+   Source:  https://github.com/go-gl/glfw
+
+--------------------------------------------------------------------------------
+6. go-text/typesetting & go-text/render
+   Copyright (c) The go-text Authors
+   License: BSD 3-Clause License
+   Source:  https://github.com/go-text
+
+--------------------------------------------------------------------------------
+7. fyne-io/systray
+   Copyright (c) Fyne.io
+   License: Apache License 2.0
+   Source:  https://github.com/fyne-io/systray
+
+--------------------------------------------------------------------------------
+8. BurntSushi/toml
+   Copyright (c) 2013 TOML authors
+   License: MIT License
+   Source:  https://github.com/BurntSushi/toml
+
+--------------------------------------------------------------------------------
+9. fsnotify/fsnotify
+   Copyright (c) 2012 The Go Authors, 2014 fsnotify Authors
+   License: BSD 3-Clause License
+   Source:  https://github.com/fsnotify/fsnotify
+
+--------------------------------------------------------------------------------
+10. godbus/dbus
+    Copyright (c) 2013 Georg Reinke, Google Inc.
+    License: BSD 2-Clause License
+    Source:  https://github.com/godbus/dbus
+
+--------------------------------------------------------------------------------
+11. srwiley/oksvg & srwiley/rasterx
+    Copyright (c) 2018 Steven R. Wiley
+    License: BSD 3-Clause License
+    Source:  https://github.com/srwiley/oksvg
+             https://github.com/srwiley/rasterx
+
+--------------------------------------------------------------------------------
+12. nicksnyder/go-i18n
+    Copyright (c) 2014 Nick Snyder
+    License: MIT License
+    Source:  https://github.com/nicksnyder/go-i18n
+
+--------------------------------------------------------------------------------
+13. yuin/goldmark
+    Copyright (c) 2019 Yusuke Inuzuka
+    License: MIT License
+    Source:  https://github.com/yuin/goldmark
+
+--------------------------------------------------------------------------------
+14. fredbi/uri
+    Copyright (c) Frederic Bidon
+    License: MIT License
+    Source:  https://github.com/fredbi/uri
+
+--------------------------------------------------------------------------------
+15. jeandeaual/go-locale
+    Copyright (c) Alexis Jeandeau
+    License: MIT License
+    Source:  https://github.com/jeandeaual/go-locale
+
+--------------------------------------------------------------------------------
+16. rymdport/portal
+    Copyright (c) Rymdport
+    License: MIT License
+    Source:  https://github.com/rymdport/portal
+
+--------------------------------------------------------------------------------
+17. gopherjs/gopherjs
+    Copyright (c) 2013 Richard Musiol
+    License: BSD 2-Clause License
+    Source:  https://github.com/gopherjs/gopherjs
+
+--------------------------------------------------------------------------------
+18. jsummers/gobmp
+    Copyright (c) Jason Summers
+    License: MIT License
+    Source:  https://github.com/jsummers/gobmp
+
+--------------------------------------------------------------------------------
+19. stretchr/testify
+    Copyright (c) 2012-2020 Mat Ryer, Tyler Bunnell and contributors
+    License: MIT License
+    Source:  https://github.com/stretchr/testify
+
+================================================================================
+
+完整的许可证文本请参阅各项目的 GitHub 仓库或通过以下命令查看：
+
+  go mod download
+  cat $(go env GOPATH)/pkg/mod/<module>@<version>/LICENSE
+
+================================================================================
