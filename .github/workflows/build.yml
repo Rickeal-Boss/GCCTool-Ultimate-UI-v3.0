@@ -43,7 +43,7 @@ jobs:
         env:
           CGO_ENABLED: 1
         run: |
-          go build -v -ldflags="-s -w -H windowsgui" -o gcc_helper.exe .
+          go build -v -tags prod -ldflags="-s -w -H windowsgui" -o gcc_helper.exe .
           go build -v -ldflags="-s -w" -o gcc_helper_debug.exe .
 
       - name: Upload artifact

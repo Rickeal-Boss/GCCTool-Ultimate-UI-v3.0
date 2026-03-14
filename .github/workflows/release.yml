@@ -82,7 +82,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo }}
-        run: go build -v -ldflags="${{ matrix.ldflags }}" -o ${{ matrix.output }} .
+        run: go build -v -tags prod -ldflags="${{ matrix.ldflags }}" -o ${{ matrix.output }} .
 
       - name: Build debug binary (with console)
         env:
