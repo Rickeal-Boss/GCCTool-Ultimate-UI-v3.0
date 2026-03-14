@@ -163,7 +163,11 @@ func buildTitleBanner() fyne.CanvasObject {
 	topShim.SetMinSize(fyne.NewSize(0, 2))
 
 	// 主标题
-	title := widget.NewRichTextFromMarkdown("**GCC 课程选课助手  V3.0**")
+	// ⚠️ widget.RichText 在 Fyne v2.5 中没有 Alignment 字段（v2.6 才加）；
+	// 改用 canvas.NewText 设置对齐，与副标题写法一致，v2.5 完全兼容。
+	title := canvas.NewText("GCC 课程选课助手  V3.0", color.White)
+	title.TextSize = 16
+	title.TextStyle = fyne.TextStyle{Bold: true}
 	title.Alignment = fyne.TextAlignCenter
 
 	// 副标题
