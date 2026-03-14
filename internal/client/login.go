@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -63,13 +64,14 @@ const (
 // Login 登录广州商学院正方 V9 教务系统
 //
 // 流程：
-//  1. GET 登录页，从 JS 变量中提取 RSA 公钥
-//  2. 解析登录页所有 hidden input（含 csrftoken 等）
-//  3. RSA-PKCS1v15 加密密码（加密失败严格拒绝，不降级明文）
+//  1. GET 登录页，同时拉取登录页 HTML（含 hidden 表单字段）
+//  2. 优先调用 /xtgl/login_getPublicKey.html 专用 API 获取 RSA 公钥；
+//     若 API 不可达，再从 HTML 内联内容提取（extractPublicKey 三种方式兜底）
+//  3. RSA-PKCS1v15 加密密码
 //  4. POST 提交登录表单（参数名：yhm=学号, mm=加密密码）
 //  5. 访问选课首页验证 Session 有效性
 func (c *Client) Login(cfg *model.Config) error {
-	// 步骤1：GET 登录页 HTML
+	// 步骤1：GET 登录页 HTML（提取 hidden 表单字段 + 备用公钥）
 	loginPageURL := c.buildURL(pathLoginPage)
 	pageHTML, err := c.doGet(loginPageURL)
 	if err != nil {
@@ -79,23 +81,26 @@ func (c *Client) Login(cfg *model.Config) error {
 	// 步骤2：提取登录页所有 hidden input（含 csrftoken 等 CSRF 保护字段）
 	formData := c.parseLoginForm(pageHTML)
 
-	// 步骤3：从页面 JS 中动态提取 RSA 公钥并加密密码
+	// 步骤3：获取 RSA 公钥
 	//
-	// 正方 V9 公钥嵌入方式为 JavaScript 变量，例如：
-	//   var publicKey = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQ...";
-	pubKey, err := c.extractPublicKey(pageHTML)
+	// 广州商学院正方 V9 使用独立 API 接口动态下发公钥（JSON 格式），
+	// 公钥不内联在登录页 HTML 中，因此必须先请求该接口。
+	// API 失败时再尝试从 HTML 内联内容提取（兼容其他正方部署方式）。
+	pubKey, err := c.fetchPublicKeyFromAPI()
 	if err != nil {
-		return fmt.Errorf("提取RSA公钥失败，无法安全加密密码，登录已中止: %w", err)
+		// API 不可达，降级到 HTML 内联解析
+		pubKey, err = c.extractPublicKey(pageHTML)
+		if err != nil {
+			return fmt.Errorf("提取RSA公钥失败，无法安全加密密码，登录已中止: %w", err)
+		}
 	}
 
 	encryptedPassword, err := encryptWithRSA(pubKey, cfg.Password)
 	if err != nil {
-		// 严格拒绝：加密失败时绝对不降级为明文传输
 		return fmt.Errorf("RSA加密密码失败，登录已中止（拒绝明文传输）: %w", err)
 	}
 
 	// 步骤4：提交登录表单
-	// 正方 V9 登录参数名：yhm=学号，mm=加密密码（V9 与旧版字段名不同）
 	formData["yhm"] = cfg.Username
 	formData["mm"] = encryptedPassword
 
@@ -163,7 +168,75 @@ func (c *Client) parseLoginForm(pageHTML string) map[string]string {
 	return formData
 }
 
-// extractPublicKey 从登录页 HTML 中动态提取 RSA 公钥
+// pathPublicKeyAPI 正方 V9 专用 RSA 公钥接口
+// 响应格式：{"modulus":"<Base64>","exponent":"<Base64>"}
+const pathPublicKeyAPI = "/xtgl/login_getPublicKey.html"
+
+// fetchPublicKeyFromAPI 调用专用接口获取 RSA 公钥
+//
+// 广州商学院（及大多数正方 V9 部署）使用独立 API 下发公钥，
+// 不将公钥内联到登录页 HTML，因此必须先请求此接口。
+//
+// 响应示例：
+//
+//	{"modulus":"AJ/oo8LU+TXxy63+...","exponent":"AQAB"}
+//
+// modulus 和 exponent 均为 Base64 编码的大端字节序整数。
+func (c *Client) fetchPublicKeyFromAPI() (string, error) {
+	apiURL := c.buildURL(pathPublicKeyAPI)
+	body, err := c.doGet(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("公钥接口请求失败: %w", err)
+	}
+
+	var resp struct {
+		Modulus  string `json:"modulus"`
+		Exponent string `json:"exponent"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return "", fmt.Errorf("公钥接口响应解析失败: %w", err)
+	}
+	if resp.Modulus == "" || resp.Exponent == "" {
+		return "", fmt.Errorf("公钥接口返回了空的 modulus 或 exponent")
+	}
+
+	// 将 Base64 编码的 modulus + exponent 组装为 DER 公钥，再 Base64 编码返回
+	return base64ModExpToBase64DER(resp.Modulus, resp.Exponent)
+}
+
+// base64ModExpToBase64DER 将 Base64 编码的 modulus+exponent 构造 RSA 公钥
+//
+// 正方 V9 公钥接口返回的 modulus/exponent 是 Base64 编码的大端字节序整数，
+// 需要解码后构造 *rsa.PublicKey，再序列化为 PKIX DER 格式。
+func base64ModExpToBase64DER(modB64, expB64 string) (string, error) {
+	modBytes, err := base64.StdEncoding.DecodeString(modB64)
+	if err != nil {
+		// 尝试 RawStdEncoding（无 padding）
+		modBytes, err = base64.RawStdEncoding.DecodeString(modB64)
+		if err != nil {
+			return "", fmt.Errorf("modulus Base64 解码失败: %w", err)
+		}
+	}
+	expBytes, err := base64.StdEncoding.DecodeString(expB64)
+	if err != nil {
+		expBytes, err = base64.RawStdEncoding.DecodeString(expB64)
+		if err != nil {
+			return "", fmt.Errorf("exponent Base64 解码失败: %w", err)
+		}
+	}
+
+	n := new(big.Int).SetBytes(modBytes)
+	e := new(big.Int).SetBytes(expBytes)
+
+	rsaPub := &rsa.PublicKey{N: n, E: int(e.Int64())}
+	derBytes, err := x509.MarshalPKIXPublicKey(rsaPub)
+	if err != nil {
+		return "", fmt.Errorf("RSA 公钥序列化失败: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(derBytes), nil
+}
+
+// extractPublicKey 从登录页 HTML 中动态提取 RSA 公钥（兜底方案）
 //
 // 正方 V9 支持三种公钥嵌入方式（按优先级顺序尝试）：
 //
