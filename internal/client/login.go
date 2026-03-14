@@ -64,14 +64,18 @@ const (
 // Login 登录广州商学院正方 V9 教务系统
 //
 // 流程：
-//  1. GET 登录页，同时拉取登录页 HTML（含 hidden 表单字段）
-//  2. 优先调用 /xtgl/login_getPublicKey.html 专用 API 获取 RSA 公钥；
-//     若 API 不可达，再从 HTML 内联内容提取（extractPublicKey 三种方式兜底）
+//  1. GET 登录页 HTML（同时建立 Cookie/Session，这是公钥接口能正常响应的前提）
+//  2. 调用 /xtgl/login_getPublicKey.html 专用 API 获取 RSA 公钥
+//     （必须在登录页请求之后，服务端可能依赖 Cookie 鉴权公钥接口）
+//     若 API 失败，再从 HTML 内联内容提取（兜底，兼容其他正方部署）
 //  3. RSA-PKCS1v15 加密密码
 //  4. POST 提交登录表单（参数名：yhm=学号, mm=加密密码）
 //  5. 访问选课首页验证 Session 有效性
 func (c *Client) Login(cfg *model.Config) error {
-	// 步骤1：GET 登录页 HTML（提取 hidden 表单字段 + 备用公钥）
+	// 步骤1：GET 登录页 HTML
+	// ⚠️ 必须先访问登录页，原因：
+	//   a. 服务端在此时设置 CSRF Cookie / Session，后续公钥接口和表单提交都依赖这些 Cookie
+	//   b. 部分正方部署会校验 Referer，先访问登录页再请求公钥接口可通过校验
 	loginPageURL := c.buildURL(pathLoginPage)
 	pageHTML, err := c.doGet(loginPageURL)
 	if err != nil {
@@ -84,14 +88,16 @@ func (c *Client) Login(cfg *model.Config) error {
 	// 步骤3：获取 RSA 公钥
 	//
 	// 广州商学院正方 V9 使用独立 API 接口动态下发公钥（JSON 格式），
-	// 公钥不内联在登录页 HTML 中，因此必须先请求该接口。
-	// API 失败时再尝试从 HTML 内联内容提取（兼容其他正方部署方式）。
-	pubKey, err := c.fetchPublicKeyFromAPI()
-	if err != nil {
-		// API 不可达，降级到 HTML 内联解析
-		pubKey, err = c.extractPublicKey(pageHTML)
-		if err != nil {
-			return fmt.Errorf("提取RSA公钥失败，无法安全加密密码，登录已中止: %w", err)
+	// 公钥不内联在登录页 HTML 中，因此必须调用专用接口。
+	// 注意：此处在登录页请求之后调用，Cookie 已建立，接口可正常响应。
+	pubKey, apiErr := c.fetchPublicKeyFromAPI()
+	if apiErr != nil {
+		// API 获取失败，尝试从 HTML 内联内容提取（兜底：兼容其他正方部署）
+		var htmlErr error
+		pubKey, htmlErr = c.extractPublicKey(pageHTML)
+		if htmlErr != nil {
+			// 两种方式都失败，把两者的错误信息都透传出去，便于精确排查
+			return fmt.Errorf("获取RSA公钥失败（API方式: %v；HTML内联方式: %v）", apiErr, htmlErr)
 		}
 	}
 
@@ -182,26 +188,69 @@ const pathPublicKeyAPI = "/xtgl/login_getPublicKey.html"
 //	{"modulus":"AJ/oo8LU+TXxy63+...","exponent":"AQAB"}
 //
 // modulus 和 exponent 均为 Base64 编码的大端字节序整数。
+//
+// 注意：此函数使用独立的 GET 请求，并设置 Accept: application/json，
+// 而非 doGet（doGet 的 Accept 是 text/html，可能导致服务端返回 HTML 错误页）。
+// 必须在登录页 GET 请求之后调用，确保 Cookie/Session 已建立。
 func (c *Client) fetchPublicKeyFromAPI() (string, error) {
 	apiURL := c.buildURL(pathPublicKeyAPI)
-	body, err := c.doGet(apiURL)
+
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("构造公钥请求失败: %w", err)
+	}
+	// 注入浏览器基础头（含 User-Agent、Cookie jar 已由 httpClient 自动带上）
+	applyBrowserHeaders(req)
+	// 覆盖 Accept 为 JSON，确保服务端返回 JSON 格式而非 HTML
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Referer", c.buildURL(pathLoginPage))
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("公钥接口请求失败: %w", err)
 	}
+	defer resp.Body.Close()
 
-	var resp struct {
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取公钥响应失败: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("公钥接口返回非预期状态码 %d（URL: %s）", resp.StatusCode, apiURL)
+	}
+
+	bodyStr := strings.TrimSpace(string(bodyBytes))
+	if !strings.HasPrefix(bodyStr, "{") {
+		// 响应不是 JSON（可能是被重定向到登录页的 HTML），截取前 200 字符帮助排查
+		preview := bodyStr
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		return "", fmt.Errorf("公钥接口返回了非JSON响应（可能被重定向到登录页），响应前200字符: %s", preview)
+	}
+
+	var keyResp struct {
 		Modulus  string `json:"modulus"`
 		Exponent string `json:"exponent"`
 	}
-	if err := json.Unmarshal([]byte(body), &resp); err != nil {
-		return "", fmt.Errorf("公钥接口响应解析失败: %w", err)
+	if err := json.Unmarshal(bodyBytes, &keyResp); err != nil {
+		return "", fmt.Errorf("公钥接口响应JSON解析失败: %w（原始响应: %s）", err, bodyStr[:min(200, len(bodyStr))])
 	}
-	if resp.Modulus == "" || resp.Exponent == "" {
-		return "", fmt.Errorf("公钥接口返回了空的 modulus 或 exponent")
+	if keyResp.Modulus == "" || keyResp.Exponent == "" {
+		return "", fmt.Errorf("公钥接口返回了空的 modulus 或 exponent（原始响应: %s）", bodyStr)
 	}
 
-	// 将 Base64 编码的 modulus + exponent 组装为 DER 公钥，再 Base64 编码返回
-	return base64ModExpToBase64DER(resp.Modulus, resp.Exponent)
+	return base64ModExpToBase64DER(keyResp.Modulus, keyResp.Exponent)
+}
+
+// min 返回两个 int 中较小的值（Go 1.22 已内置，此处显式定义确保兼容性）
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // base64ModExpToBase64DER 将 Base64 编码的 modulus+exponent 构造 RSA 公钥

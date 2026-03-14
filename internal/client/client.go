@@ -119,6 +119,10 @@ func applyBrowserHeaders(req *http.Request) {
 }
 
 // doGet GET请求（注入浏览器请求头，防止被 User-Agent 特征识别）
+//
+// 注意：http.Client 默认会跟随重定向，但不会把最终非 2xx 状态码视为错误。
+// 此处手动检查状态码，确保调用方拿到的是真正的业务响应，
+// 而非 302 目标页或 403/500 错误 HTML，防止上层把错误页面当 JSON 解析。
 func (c *Client) doGet(rawURL string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -135,6 +139,10 @@ func (c *Client) doGet(rawURL string) (string, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Request.URL.String())
 	}
 
 	return string(body), nil
