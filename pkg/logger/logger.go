@@ -52,46 +52,59 @@ func (l *Logger) Close() {
 	close(l.logChan)
 }
 
-// processLogs 处理日志
+// processLogs 处理日志（单 goroutine 串行消费，避免并发写 UI）
 func (l *Logger) processLogs() {
 	for msg := range l.logChan {
-		// 格式化日志
-		formatted := l.formatLog(msg)
+		// UI 文本：无 ANSI 转义码（widget.Label 不渲染转义，会显示为乱码）
+		uiText := l.formatLogUI(msg)
+		l.ui.AppendLog(uiText)
 
-		// 输出到UI
-		l.ui.AppendLog(formatted)
-
-		// 输出到控制台（仅调试构建，生产构建通过 isProdBuild() 关闭）
-		// 原因：fmt.Println 输出到 stdout，任何能读取终端的进程均可截获，
-		// 日志中包含学号、选课信息等个人隐私数据。
+		// 终端输出：带 ANSI 颜色（仅调试构建；生产构建通过 isProdBuild 关闭）
+		// stdout 输出含学号/选课信息，生产构建必须关闭
 		if !isProdBuild {
-			fmt.Println(formatted)
+			fmt.Println(l.formatLogTerminal(msg))
 		}
 	}
 }
 
-// formatLog 格式化日志
-func (l *Logger) formatLog(msg logMessage) string {
+// formatLogUI 格式化日志文本（供 widget.Label 显示，不含 ANSI 转义）
+func (l *Logger) formatLogUI(msg logMessage) string {
 	timestamp := msg.time.Format("15:04:05")
-
 	var level string
-	var color string
 	switch msg.level {
 	case LevelInfo:
 		level = "[INFO]"
-		color = "\033[0m"
 	case LevelWarn:
 		level = "[WARN]"
-		color = "\033[33m"
 	case LevelError:
 		level = "[ERROR]"
-		color = "\033[31m"
 	case LevelSuccess:
-		level = "[SUCCESS]"
-		color = "\033[32m"
+		level = "[成功]"
 	}
+	return fmt.Sprintf("%s %s %s", timestamp, level, msg.message)
+}
 
-	return fmt.Sprintf("%s %s %s %s", timestamp, color, level, msg.message)
+// formatLogTerminal 格式化日志文本（供终端输出，含 ANSI 颜色）
+// 仅在 isProdBuild=false 时使用
+func (l *Logger) formatLogTerminal(msg logMessage) string {
+	timestamp := msg.time.Format("15:04:05")
+	var level, ansiColor, reset string
+	reset = "\033[0m"
+	switch msg.level {
+	case LevelInfo:
+		level = "[INFO]"
+		ansiColor = "\033[0m"
+	case LevelWarn:
+		level = "[WARN]"
+		ansiColor = "\033[33m"
+	case LevelError:
+		level = "[ERROR]"
+		ansiColor = "\033[31m"
+	case LevelSuccess:
+		level = "[成功]"
+		ansiColor = "\033[32m"
+	}
+	return fmt.Sprintf("%s %s%s%s %s", timestamp, ansiColor, level, reset, msg.message)
 }
 
 // Info 信息日志
