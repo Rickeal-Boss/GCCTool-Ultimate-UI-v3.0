@@ -61,8 +61,12 @@ func (l *Logger) processLogs() {
 		// 输出到UI
 		l.ui.AppendLog(formatted)
 
-		// 输出到控制台
-		fmt.Println(formatted)
+		// 输出到控制台（仅调试构建，生产构建通过 isProdBuild() 关闭）
+		// 原因：fmt.Println 输出到 stdout，任何能读取终端的进程均可截获，
+		// 日志中包含学号、选课信息等个人隐私数据。
+		if !isProdBuild {
+			fmt.Println(formatted)
+		}
 	}
 }
 
