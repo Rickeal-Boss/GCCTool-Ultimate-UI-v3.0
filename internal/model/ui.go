@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
@@ -151,22 +152,33 @@ func (ui *UIComponents) UpdateCourseList(courses []*Course) {
 	}
 }
 
-// AppendLog 追加日志（限制最大行数，防止内存无限增长）
+// AppendLog 追加日志（线程安全，通过 fyne.Do 在主 goroutine 更新 UI）
+//
+// Fyne 的 canvas 对象（Label、Scroll）只能在 UI 主线程（goroutine）读写；
+// logger.go 的 processLogs 运行在独立 goroutine，直接调用 SetText 会导致
+// 数据竞争（race detector 报错）和偶发渲染撕裂。
+// 使用 fyne.Do 将实际更新操作投递到主线程执行队列，保证线程安全。
 func (ui *UIComponents) AppendLog(message string) {
+	// 先在当前 goroutine 拼好文本，减少主线程锁持有时间
 	ui.logLines = append(ui.logLines, message)
 	if len(ui.logLines) > maxLogLines {
-		// 丢弃最旧的 1/4，保留最新的 3/4
 		keep := maxLogLines * 3 / 4
 		ui.logLines = ui.logLines[len(ui.logLines)-keep:]
 	}
-	ui.LogLabel.SetText(strings.Join(ui.logLines, "\n"))
-	ui.LogScroll.ScrollToBottom()
+	text := strings.Join(ui.logLines, "\n")
+
+	fyne.Do(func() {
+		ui.LogLabel.SetText(text)
+		ui.LogScroll.ScrollToBottom()
+	})
 }
 
-// ClearLog 清空日志
+// ClearLog 清空日志（线程安全）
 func (ui *UIComponents) ClearLog() {
 	ui.logLines = ui.logLines[:0]
-	ui.LogLabel.SetText("")
+	fyne.Do(func() {
+		ui.LogLabel.SetText("")
+	})
 }
 
 func parseInt(s string) int {

@@ -14,23 +14,23 @@ import (
 )
 
 const (
-	// baseInterval 每轮请求之间的基础等待时间（毫秒）
-	// 加上随机 jitter 后实际范围为 200~500ms，避免多 worker 同步发包形成脉冲
+	// baseIntervalMs 每轮选课请求之间的基础等待时间（毫秒）
+	// 加上随机 jitter 后实际范围 200~500ms，避免多 Worker 同步发包形成脉冲
 	baseIntervalMs = 200
 	// jitterMs 随机抖动上限（毫秒）
 	jitterMs = 300
 
-	// rateLimitBackoffBase 被限流（429/503）时的初始退避时间（秒）
+	// rateLimitBackoffBase 被限流（429/503/"频繁"）时的初始退避秒数
 	rateLimitBackoffBase = 5
-	// rateLimitBackoffMax 被限流时最大退避时间（秒）
+	// rateLimitBackoffMax 被限流时的最大退避秒数
 	rateLimitBackoffMax = 60
 )
 
 // Robber 抢课调度器
 type Robber struct {
-	client  *client.Client
-	logger  *logger.Logger
-	config  *model.Config
+	client *client.Client
+	logger *logger.Logger
+	config *model.Config
 
 	running bool
 	cancel  context.CancelFunc
@@ -45,7 +45,14 @@ func NewRobber(clt *client.Client, log *logger.Logger) *Robber {
 	}
 }
 
-// Start 开始抢课
+// Start 登录并在后台启动抢课任务，立即返回（非阻塞）
+//
+// 调用方（ui/main.go）已在 go func() 中调用，此处不应再调用 time.Sleep 或 wg.Wait，
+// 否则会把 UI goroutine 永久挂起，导致停止按钮无响应。
+//
+// 流程：
+//  1. 同步登录（有错误立即返回，让 UI 显示错误信息）
+//  2. 启动独立 goroutine 等待开始时间，时间到后启动 Worker
 func (r *Robber) Start(cfg *model.Config) error {
 	if r.running {
 		return fmt.Errorf("抢课已经在运行中")
@@ -54,7 +61,6 @@ func (r *Robber) Start(cfg *model.Config) error {
 	r.config = cfg
 	r.running = true
 
-	// 取消之前的context（如有）
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -62,10 +68,7 @@ func (r *Robber) Start(cfg *model.Config) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
-	r.logger.Info("开始抢课...")
-
-	// M5：先登录，再等待开始时间
-	// 每次 Start 都创建了新的 Client（cookie jar 是空的），必须重新登录
+	// 步骤1：同步登录（每次 Start 都新建了 Client，Cookie Jar 为空，必须重新登录）
 	r.logger.Info("正在登录教务系统...")
 	if err := r.client.Login(cfg); err != nil {
 		r.running = false
@@ -74,20 +77,33 @@ func (r *Robber) Start(cfg *model.Config) error {
 	}
 	r.logger.Info("登录成功")
 
-	// 计算开始时间
-	startTime := r.calculateStartTime()
-	r.logger.Info(fmt.Sprintf("计划开始时间: %s", startTime.Format("15:04:05")))
+	// 步骤2：在后台 goroutine 里等待开始时间，到点再启动 Worker
+	// 不在此处阻塞，UI 线程可以继续响应停止按钮
+	go func() {
+		startTime := r.calculateStartTime()
+		r.logger.Info(fmt.Sprintf("计划开始时间: %s", startTime.Format("15:04:05")))
+		r.waitUntil(ctx, startTime)
 
-	// 等待到开始时间
-	r.waitUntil(startTime)
+		// 检查是否已被停止（等待期间用户可能点了停止）
+		select {
+		case <-ctx.Done():
+			r.logger.Info("等待期间任务已取消")
+			return
+		default:
+		}
 
-	// 开始抢课循环
-	r.startRobbery(ctx)
+		r.logger.Info("开始抢课...")
+		r.startWorkers(ctx)
+	}()
 
 	return nil
 }
 
 // Stop 停止抢课
+//
+// 仅发送取消信号，不阻塞等待 Worker 退出。
+// Worker 会在下一轮循环检测到 ctx.Done() 后自行退出，
+// 避免在 UI 线程中调用 wg.Wait() 导致界面冻结。
 func (r *Robber) Stop() {
 	if !r.running {
 		return
@@ -100,13 +116,14 @@ func (r *Robber) Stop() {
 		r.cancel()
 	}
 
-	// 等待所有goroutine结束
-	r.wg.Wait()
-
-	r.logger.Info("抢课已停止")
+	// 在后台等待 Worker 退出，完成后记录日志
+	go func() {
+		r.wg.Wait()
+		r.logger.Info("抢课已停止")
+	}()
 }
 
-// calculateStartTime 计算开始时间
+// calculateStartTime 计算目标开始时间（含提前量）
 func (r *Robber) calculateStartTime() time.Time {
 	now := time.Now()
 	target := time.Date(
@@ -115,10 +132,9 @@ func (r *Robber) calculateStartTime() time.Time {
 		now.Location(),
 	)
 
-	// 提前开始
 	target = target.Add(-time.Duration(r.config.Advance) * time.Minute)
 
-	// 如果时间已过，则明天开始
+	// 目标时间已过，改为明天同一时刻
 	if target.Before(now) {
 		target = target.Add(24 * time.Hour)
 	}
@@ -126,34 +142,41 @@ func (r *Robber) calculateStartTime() time.Time {
 	return target
 }
 
-// waitUntil 等待到指定时间
-func (r *Robber) waitUntil(target time.Time) {
-	now := time.Now()
-	duration := target.Sub(now)
+// waitUntil 可中断地等待到目标时间
+//
+// 接受 ctx，用户点停止时可立即退出，不会卡在 time.Sleep 直到开始时间
+func (r *Robber) waitUntil(ctx context.Context, target time.Time) {
+	duration := time.Until(target)
+	if duration <= 0 {
+		return
+	}
 
-	if duration > 0 {
-		r.logger.Info(fmt.Sprintf("等待 %d 分 %d 秒...", int(duration.Minutes()), int(duration.Seconds())%60))
-		time.Sleep(duration)
+	r.logger.Info(fmt.Sprintf("等待 %d 分 %d 秒...", int(duration.Minutes()), int(duration.Seconds())%60))
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(duration):
 	}
 }
 
-// startRobbery 开始抢课
-func (r *Robber) startRobbery(ctx context.Context) {
-	// 启动多个worker并发抢课
+// startWorkers 启动指定数量的并发 Worker
+func (r *Robber) startWorkers(ctx context.Context) {
 	for i := 0; i < r.config.Threads; i++ {
 		r.wg.Add(1)
 		go r.worker(ctx, i+1)
 	}
 }
 
-// worker 抢课worker
+// worker 抢课 Worker
+//
+// 每轮只发一次选课提交请求（do_jxb_id 在启动前缓存好）。
+// 被限流时使用指数退避；ctx 取消时立即退出。
 func (r *Robber) worker(ctx context.Context, id int) {
 	defer r.wg.Done()
 
 	r.logger.Info(fmt.Sprintf("Worker %d 启动", id))
 
-	// backoffSec：当前退避秒数，初始为 0（不退避）
-	// 被限流后指数增长，成功后重置
+	// backoffSec：当前退避秒数，0 表示正常节奏
 	backoffSec := 0
 
 	for {
@@ -162,110 +185,87 @@ func (r *Robber) worker(ctx context.Context, id int) {
 			r.logger.Info(fmt.Sprintf("Worker %d 停止", id))
 			return
 		default:
-			// 如果处于退避状态，先等待后再试
-			if backoffSec > 0 {
-				r.logger.Warn(fmt.Sprintf("Worker %d 触发限流保护，等待 %ds 后重试", id, backoffSec))
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(backoffSec) * time.Second):
-				}
-			}
+		}
 
-			// 执行抢课
-			err := r.robCourse(id)
-			if err != nil {
-				errMsg := err.Error()
-				// 识别服务端限流信号（HTTP 429 / 503 / "频繁"等关键词）
-				// 被限流时启用指数退避，避免持续轰炸触发封号
-				if isRateLimited(errMsg) {
-					if backoffSec == 0 {
-						backoffSec = rateLimitBackoffBase
-					} else {
-						backoffSec = min(backoffSec*2, rateLimitBackoffMax)
-					}
-					r.logger.Warn(fmt.Sprintf("Worker %d 检测到限流响应: %v", id, err))
-				} else {
-					// 普通失败：重置退避，记录日志
-					backoffSec = 0
-					r.logger.Error(fmt.Sprintf("Worker %d 抢课失败: %v", id, err))
-				}
-			} else {
-				// 成功：重置退避
-				backoffSec = 0
-			}
-
-			// M3：加随机 jitter，防止多 Worker 同步发包形成脉冲流量
-			// 实际等待范围：baseIntervalMs ~ baseIntervalMs+jitterMs (200~500ms)
-			jitter := rand.Intn(jitterMs)
+		// 限流退避：等待后再发请求
+		if backoffSec > 0 {
+			r.logger.Warn(fmt.Sprintf("Worker %d 限流保护，等待 %ds 后重试", id, backoffSec))
 			select {
 			case <-ctx.Done():
+				r.logger.Info(fmt.Sprintf("Worker %d 停止", id))
 				return
-			case <-time.After(time.Duration(baseIntervalMs+jitter) * time.Millisecond):
+			case <-time.After(time.Duration(backoffSec) * time.Second):
 			}
 		}
-	}
-}
 
-// isRateLimited 判断错误是否为服务端限流
-func isRateLimited(msg string) bool {
-	keywords := []string{"429", "503", "频繁", "限流", "too many", "rate limit", "slow down"}
-	lower := strings.ToLower(msg)
-	for _, kw := range keywords {
-		if strings.Contains(lower, kw) {
-			return true
+		err := r.robCourse(id)
+		switch {
+		case err == nil:
+			backoffSec = 0
+		case isRateLimited(err.Error()):
+			// 指数退避：5 → 10 → 20 → ... → 60s
+			if backoffSec == 0 {
+				backoffSec = rateLimitBackoffBase
+			} else {
+				backoffSec = min(backoffSec*2, rateLimitBackoffMax)
+			}
+			r.logger.Warn(fmt.Sprintf("Worker %d 检测到限流: %v", id, err))
+		default:
+			backoffSec = 0
+			r.logger.Error(fmt.Sprintf("Worker %d 抢课失败: %v", id, err))
+		}
+
+		// 每轮结束后随机延迟，错开多 Worker 的发包时间点
+		jitter := rand.Intn(jitterMs)
+		select {
+		case <-ctx.Done():
+			r.logger.Info(fmt.Sprintf("Worker %d 停止", id))
+			return
+		case <-time.After(time.Duration(baseIntervalMs+jitter) * time.Millisecond):
 		}
 	}
-	return false
 }
 
-// min 返回两个整数中较小的那个（Go 1.21 之前无内置 min）
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// robCourse 抢课逻辑
+// robCourse 执行一轮抢课逻辑
+//
+// 请求次数优化：
+//   - 每轮只调用 GetClassList（1次）+ SelectCourse（1次/课程）
+//   - GetClassInfo 仅在第一次遇到某门课时调用，do_jxb_id 缓存在 course.Extra 里
+//   - SelectCourse 不再重复 GET 首页 + POST display（已移至 client 层缓存）
 func (r *Robber) robCourse(workerID int) error {
-	// 步骤1: 获取课程列表
+	// 获取课程列表（含剩余名额信息）
 	courseList, err := r.client.GetClassList(r.config)
 	if err != nil {
 		return fmt.Errorf("获取课程列表失败: %w", err)
 	}
 
-	// 步骤2: 筛选符合条件的课程
-	matchedCourses := r.filterCourses(courseList)
-	if len(matchedCourses) == 0 {
+	matched := r.filterCourses(courseList)
+	if len(matched) == 0 {
 		return fmt.Errorf("没有符合条件的课程")
 	}
 
-	// 步骤3: 遍历课程尝试选课
-	for _, course := range matchedCourses {
-		// 检查是否满员
+	for _, course := range matched {
 		if course.IsFull() {
 			r.logger.Warn(fmt.Sprintf("课程已满: %s", course.Name))
 			continue
 		}
 
-		// 获取课程详情
-		extra, err := r.client.GetClassInfo(course.ID)
-		if err != nil {
-			r.logger.Warn(fmt.Sprintf("获取课程详情失败: %s - %v", course.Name, err))
-			continue
+		// do_jxb_id 只在 Extra 为空时拉取一次，后续循环直接复用缓存值
+		if course.Extra == nil {
+			extra, err := r.client.GetClassInfo(course.ID)
+			if err != nil {
+				r.logger.Warn(fmt.Sprintf("获取课程详情失败: %s - %v", course.Name, err))
+				continue
+			}
+			course.Extra = extra
 		}
-		course.Extra = extra
 
-		// 尝试选课
 		r.logger.Info(fmt.Sprintf("Worker %d 尝试选课: %s (%s)", workerID, course.Name, course.Teacher))
-		err = r.client.SelectCourse(course)
-		if err != nil {
+		if err := r.client.SelectCourse(course); err != nil {
 			r.logger.Warn(fmt.Sprintf("选课失败: %s - %v", course.Name, err))
 			continue
 		}
 
-		// 选课成功
 		r.logger.Success(fmt.Sprintf("✓ 选课成功: %s (%s) %s", course.Name, course.Teacher, course.WeekTime))
 		return nil
 	}
@@ -273,21 +273,29 @@ func (r *Robber) robCourse(workerID int) error {
 	return fmt.Errorf("没有成功选到课程")
 }
 
-// filterCourses 筛选课程
+// filterCourses 筛选符合配置条件的课程
 func (r *Robber) filterCourses(courseList *model.CourseList) []*model.Course {
-	matched := make([]*model.Course, 0)
-
+	matched := make([]*model.Course, 0, len(courseList.Items))
 	for _, course := range courseList.Items {
-		// 检查是否匹配配置
 		if course.Match(r.config) {
 			matched = append(matched, course)
 		}
 	}
-
 	return matched
 }
 
-// IsRunning 检查是否正在运行
+// isRateLimited 判断错误信息是否为服务端限流信号
+func isRateLimited(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, kw := range []string{"429", "503", "频繁", "限流", "too many", "rate limit", "slow down"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsRunning 返回当前是否正在运行
 func (r *Robber) IsRunning() bool {
 	return r.running
 }

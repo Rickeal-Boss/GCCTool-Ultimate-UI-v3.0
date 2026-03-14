@@ -5,22 +5,26 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/net/html"
+
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
 )
 
 // GetClassList 获取课程列表
 func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
-	// 步骤1: 初始化POST参数1
-	indexURL := c.buildURL("/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
+	// 步骤1: 获取选课首页（携带 gnmkdm 参数，正方 V9 必须）
+	indexURL := c.buildURL(pathSelectIndex) + "?gnmkdm=" + gnmkdmSelect + "&layout=default"
 	indexHTML, err := c.doGet(indexURL)
 	if err != nil {
 		return nil, err
 	}
 
 	postData1 := c.parseHiddenInputs(indexHTML)
+	// 补充 gnmkdm，POST 请求也需要携带
+	postData1["gnmkdm"] = gnmkdmSelect
 
-	// 步骤2: 获取更多参数
-	displayURL := c.buildURL("/xsxk/zzxkyzb_cxZzxkYzbDisplay.html")
+	// 步骤2: 获取选课参数
+	displayURL := c.buildURL(pathSelectDisplay) + "?gnmkdm=" + gnmkdmSelect
 	_, err = c.doPost(displayURL, postData1)
 	if err != nil {
 		return nil, err
@@ -30,7 +34,7 @@ func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
 	postData2 := c.buildCourseQueryParams(postData1, cfg)
 
 	// 步骤4: 获取课程列表JSON
-	partURL := c.buildURL("/xsxk/zzxkyzb_cxZzxkYzbPartDisplay.html")
+	partURL := c.buildURL(pathCourseList) + "?gnmkdm=" + gnmkdmSelect
 	resp, err := c.doPost(partURL, postData2)
 	if err != nil {
 		return nil, err
@@ -40,76 +44,34 @@ func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
 	return model.ParseCourseList([]byte(resp))
 }
 
-// parseHiddenInputs 解析HTML中的hidden input
-// 关键修复：使用proper的HTML解析，不依赖正则
-func (c *Client) parseHiddenInputs(html string) map[string]string {
+// parseHiddenInputs 解析 HTML 中所有 hidden input 的 name/value
+// 使用 golang.org/x/net/html 正规解析，与 login.go 中 parseLoginForm 逻辑一致，
+// 避免手写字符串切割在多行/属性顺序变化时解析失败的问题。
+func (c *Client) parseHiddenInputs(pageHTML string) map[string]string {
 	result := make(map[string]string)
 
-	// 分割HTML行
-	lines := strings.Split(html, "\n")
+	doc, err := html.Parse(strings.NewReader(pageHTML))
+	if err != nil {
+		return result
+	}
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		// 查找input标签
-		if !strings.Contains(line, "<input") {
-			continue
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "input" {
+			attrs := attrMap(n.Attr)
+			if strings.EqualFold(attrs["type"], "hidden") {
+				if name := attrs["name"]; name != "" {
+					result[name] = attrs["value"]
+				}
+			}
 		}
-
-		// 检查是否为hidden类型
-		if !strings.Contains(line, "type=\"hidden\"") && !strings.Contains(line, "type='hidden'") {
-			continue
-		}
-
-		// 提取name和value
-		// 处理多种格式：name="xxx" value="yyy" 或 name='xxx' value='yyy'
-		name := c.extractAttr(line, "name")
-		value := c.extractAttr(line, "value")
-
-		if name != "" {
-			result[name] = value
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
 		}
 	}
+	walk(doc)
 
 	return result
-}
-
-// extractAttr 提取HTML属性值
-func (c *Client) extractAttr(line, attrName string) string {
-	// 查找 attrName="
-	prefix := attrName + `="`
-	startIdx := strings.Index(line, prefix)
-	if startIdx == -1 {
-		// 尝试单引号
-		prefix = attrName + `='`
-		startIdx = strings.Index(line, prefix)
-		if startIdx == -1 {
-			// 尝试无引号格式 name=xxx
-			prefix = attrName + "="
-			startIdx = strings.Index(line, prefix)
-			if startIdx == -1 {
-				return ""
-			}
-			// 无引号格式：查找下一个空格或>
-			endIdx := strings.IndexAny(line[startIdx+len(prefix):], " >")
-			if endIdx == -1 {
-				return line[startIdx+len(prefix):]
-			}
-			return line[startIdx+len(prefix) : startIdx+len(prefix)+endIdx]
-		}
-	}
-
-	startIdx += len(prefix)
-	endIdx := strings.Index(line[startIdx:], `"`)
-	if endIdx == -1 {
-		// 单引号结尾
-		endIdx = strings.Index(line[startIdx:], `'`)
-		if endIdx == -1 {
-			return ""
-		}
-	}
-
-	return line[startIdx : startIdx+endIdx]
 }
 
 // buildCourseQueryParams 构建课程查询参数
@@ -145,27 +107,27 @@ func getCourseTypeCode(courseType string) string {
 	return "10" // 默认网课
 }
 
-// GetClassInfo 获取课程详情（上课时间等）
+// GetClassInfo 获取课程详情（上课时间、do_jxb_id 加密 ID 等）
 func (c *Client) GetClassInfo(courseID string) (*model.CourseExtra, error) {
-	// 构建查询参数
 	params := map[string]string{
-		"kch_id": courseID,
+		"kch_id":  courseID,
+		"gnmkdm": gnmkdmSelect,
 	}
 
-	// 发送请求
-	url := c.buildURL("/xsxk/zzxkyzbjk_cxJxbWithKchZzxkYzb.html")
-	resp, err := c.doPost(url, params)
+	infoURL := c.buildURL(pathCourseInfo) + "?gnmkdm=" + gnmkdmSelect
+	resp, err := c.doPost(infoURL, params)
 	if err != nil {
 		return nil, err
 	}
 
-	// 解析响应
+	// 解析响应（正方 V9 的课程详情包含 do_jxb_id 加密长 ID）
 	var result struct {
-		Kcmc    string `json:"kcmc"`    // 课程名称
-		Jsm     string `json:"jsm"`     // 老师姓名
-		Jsmc    string `json:"jsmc"`    // 教室名称
-		Sksj    string `json:"sksj"`    // 上课时间
-		Kcbj    string `json:"kcbj"`    // 课程备注
+		Kcmc    string `json:"kcmc"`      // 课程名称
+		Jsm     string `json:"jsm"`       // 老师姓名
+		Jsmc    string `json:"jsmc"`      // 教室名称
+		Sksj    string `json:"sksj"`      // 上课时间
+		Kcbj    string `json:"kcbj"`      // 课程备注
+		DoJxbID string `json:"do_jxb_id"` // 正方 V9：加密长 ID，选课必须用此值
 	}
 
 	if err := json.Unmarshal([]byte(resp), &result); err != nil {
@@ -176,5 +138,6 @@ func (c *Client) GetClassInfo(courseID string) (*model.CourseExtra, error) {
 		ClassInfo: result.Jsmc,
 		ExamInfo:  result.Sksj,
 		Remark:    result.Kcbj,
+		DoJxbID:   result.DoJxbID,
 	}, nil
 }

@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // Course 课程信息
@@ -33,11 +34,14 @@ type Course struct {
 	Extra       *CourseExtra
 }
 
-// CourseExtra 课程扩展信息
+// CourseExtra 课程扩展信息（由 GetClassInfo 获取）
 type CourseExtra struct {
-	ClassInfo   string
-	ExamInfo    string
-	Remark      string
+	ClassInfo string // 教室名称
+	ExamInfo  string // 上课时间
+	Remark    string // 课程备注
+	// DoJxbID：正方 V9 的加密教学班长 ID，选课时必须使用此值（非短 jxb_id）
+	// 字段名在接口响应中为 do_jxb_id
+	DoJxbID string
 }
 
 // CourseList 课程列表
@@ -59,18 +63,18 @@ func (c *Course) Match(cfg *Config) bool {
 		return false
 	}
 
-	// 检查课程名称
-	if cfg.CourseName != "" && !contains(c.Name, cfg.CourseName) {
+	// 检查课程名称（不区分大小写）
+	if cfg.CourseName != "" && !strings.Contains(strings.ToLower(c.Name), strings.ToLower(cfg.CourseName)) {
 		return false
 	}
 
-	// 检查老师
+	// 检查老师（精确匹配）
 	if cfg.TeacherName != "" && c.Teacher != cfg.TeacherName {
 		return false
 	}
 
-	// 检查课程编号
-	if cfg.CourseNumber != "" && !contains(c.Number, cfg.CourseNumber) {
+	// 检查课程编号（不区分大小写）
+	if cfg.CourseNumber != "" && !strings.Contains(strings.ToLower(c.Number), strings.ToLower(cfg.CourseNumber)) {
 		return false
 	}
 
@@ -144,34 +148,4 @@ func ParseCourseList(data []byte) (*CourseList, error) {
 
 	list.Total = len(list.Items)
 	return list, nil
-}
-
-// contains 检查字符串是否包含子串（不区分大小写）
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr || len(substr) == 0 ||
-		 findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		match := true
-		for j := 0; j < len(substr); j++ {
-			if toLower(s[i+j]) != toLower(substr[j]) {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
-
-func toLower(c byte) byte {
-	if c >= 'A' && c <= 'Z' {
-		return c + 32
-	}
-	return c
 }

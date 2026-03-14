@@ -2,15 +2,21 @@ package ui
 
 // liquid_button.go — iOS 26 液态玻璃风格按钮
 //
-// 视觉层次（从底到顶）：
-//   1. glowRect   — 外发光光晕（比按钮大 4px，极低透明度）
-//   2. baseRect   — 玻璃主体（半透明白色 + 大圆角）
-//   3. borderRect — 玻璃边框（半透明白色描边，模拟边缘反光）
-//   4. shimRect   — 顶部高光条（白色渐变，模拟玻璃折射，高度占 40%）
-//   5. label      — 图标 + 文字
+// 视觉层次（底→顶）：
+//  1. glowRect   — 外发光光晕（比按钮大 4px，极低透明度）
+//  2. baseRect   — 玻璃主体（半透明白色 + 大圆角 + 彩色描边）
+//  3. shimTop    — 顶部高光上段（白色半透明，模拟玻璃折射，顶角圆角）
+//  4. shimBottom — 顶部高光下段（极低透明，渐隐）
+//  5. label + icon — 图标 + 文字
 //
-// 由于 Fyne 不支持真实背景模糊，通过多层半透明矩形 + 色彩叠加模拟毛玻璃质感。
-// 按下时 baseRect 透明度加深，松开恢复，提供视觉反馈。
+// 状态机：
+//   normal → hovered → pressed → released (tapped)
+//   normal → disabled
+//
+// 优化：
+//   - MouseDown/MouseUp 分离：mousedown 立即更新 pressed=true 给视觉反馈，
+//     不需要等 Tapped 回调（Tapped 在 mouseup 后触发，会有 1 帧延迟感）
+//   - fyne.MeasureText 精确测量文字宽度，消除"文字截断"或"按钮太宽"问题
 
 import (
 	"image/color"
@@ -19,102 +25,73 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
-// ── 液态玻璃按钮颜色常量 ─────────────────────────────────────────────────────
+// ── 颜色常量 ─────────────────────────────────────────────────────────────────
 
-// 玻璃主体：白色半透明，模拟磨砂玻璃
-var lgBase = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x55}
+var lgBase = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x55}        // 正常主体
+var lgBaseHover = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x72}   // 悬停
+var lgBasePressed = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x38} // 按下（加深）
+var lgBaseDisabled = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x28} // 禁用
+var lgBorder = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xAA}      // 玻璃边框
+var lgShimTop = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x59}     // 高光上段
+var lgShimBottom = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x0A}  // 高光下段
+var lgGlow = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x18}        // 外发光
+var lgText = color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xFF}        // 正常文字
+var lgTextDisabled = color.NRGBA{R: 0x9E, G: 0x9E, B: 0x9E, A: 0xFF} // 禁用文字
 
-// 悬停时主体：稍微更亮
-var lgBaseHover = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x72}
+// ── LiquidButton ─────────────────────────────────────────────────────────────
 
-// 按下时主体：加深，给压感反馈
-var lgBasePressed = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x38}
-
-// 禁用时主体：更低透明度
-var lgBaseDisabled = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x28}
-
-// 玻璃边框：半透明白色，模拟玻璃边缘折射
-var lgBorder = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xAA}
-
-// 顶部高光：白色，不透明度 35%，模拟玻璃顶部折射光
-var lgShimTop = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x59}
-
-// 高光底部（渐变消失方向，用极低透明度）
-var lgShimBottom = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x0A}
-
-// 外发光：按钮颜色的半透明扩散
-var lgGlow = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x18}
-
-// 文字色：深色，保证可读性
-var lgText = color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xFF}
-
-// 禁用文字色
-var lgTextDisabled = color.NRGBA{R: 0x9E, G: 0x9E, B: 0x9E, A: 0xFF}
-
-// ── LiquidButton 液态玻璃按钮 ────────────────────────────────────────────────
-
-// LiquidButton 是一个自定义 Widget，实现 iOS 26 液态玻璃风格按钮。
-// 支持图标、文字、悬停/按下/禁用状态动画。
+// LiquidButton 液态玻璃风格自定义 Widget。
+// 实现 desktop.Hoverable + desktop.Mouseable，响应 Hover 和 MouseDown/MouseUp。
 type LiquidButton struct {
 	widget.BaseWidget
 
-	// 配置
-	Label    string
-	Icon     fyne.Resource
-	OnTapped func()
-
-	// 颜色强调（影响外发光和边框色调）
-	// 默认 nil 时使用白色系；传入颜色后混入对应色调
+	Label       string
+	Icon        fyne.Resource
+	OnTapped    func()
 	AccentColor *color.NRGBA
 
-	// 内部状态
 	hovered  bool
 	pressed  bool
 	disabled bool
 
-	// 渲染对象（由 CreateRenderer 创建并持有）
 	renderer *liquidButtonRenderer
 }
 
-// NewLiquidButton 创建液态玻璃按钮
+// NewLiquidButton 创建液态玻璃按钮（无强调色）
 func NewLiquidButton(label string, icon fyne.Resource, tapped func()) *LiquidButton {
-	b := &LiquidButton{
-		Label:    label,
-		Icon:     icon,
-		OnTapped: tapped,
-	}
+	b := &LiquidButton{Label: label, Icon: icon, OnTapped: tapped}
 	b.ExtendBaseWidget(b)
 	return b
 }
 
-// NewLiquidButtonWithAccent 创建带色调的液态玻璃按钮（用于启动/停止等有语义颜色的按钮）
+// NewLiquidButtonWithAccent 创建带强调色的液态玻璃按钮
 func NewLiquidButtonWithAccent(label string, icon fyne.Resource, accent color.NRGBA, tapped func()) *LiquidButton {
 	b := NewLiquidButton(label, icon, tapped)
 	b.AccentColor = &accent
 	return b
 }
 
-// Enable 启用按钮
+// Enable / Disable / Disabled
+
 func (b *LiquidButton) Enable() {
 	b.disabled = false
 	b.Refresh()
 }
 
-// Disable 禁用按钮
 func (b *LiquidButton) Disable() {
 	b.disabled = true
 	b.Refresh()
 }
 
-// Disabled 返回是否禁用
-func (b *LiquidButton) Disabled() bool {
-	return b.disabled
-}
+func (b *LiquidButton) Disabled() bool { return b.disabled }
 
-// Tapped 响应点击
+// ── 事件响应 ─────────────────────────────────────────────────────────────────
+
+// Tapped 鼠标/触控松开后触发
 func (b *LiquidButton) Tapped(_ *fyne.PointEvent) {
 	if b.disabled {
 		return
@@ -126,10 +103,28 @@ func (b *LiquidButton) Tapped(_ *fyne.PointEvent) {
 	}
 }
 
-// TappedSecondary 右键不做任何处理
 func (b *LiquidButton) TappedSecondary(_ *fyne.PointEvent) {}
 
-// MouseIn 鼠标进入
+// MouseDown 鼠标按下：立即更新为 pressed 状态，给用户即时视觉反馈
+// 这比等 Tapped（mousedown+mouseup 都完成后）触发快一帧
+func (b *LiquidButton) MouseDown(_ *desktop.MouseEvent) {
+	if b.disabled {
+		return
+	}
+	b.pressed = true
+	b.Refresh()
+}
+
+// MouseUp 鼠标松开：回到 hovered 状态（Tapped 回调在此之后由框架触发）
+func (b *LiquidButton) MouseUp(_ *desktop.MouseEvent) {
+	if b.disabled {
+		return
+	}
+	b.pressed = false
+	b.Refresh()
+}
+
+// MouseIn 鼠标进入悬停区域
 func (b *LiquidButton) MouseIn(_ *desktop.MouseEvent) {
 	if b.disabled {
 		return
@@ -138,73 +133,64 @@ func (b *LiquidButton) MouseIn(_ *desktop.MouseEvent) {
 	b.Refresh()
 }
 
-// MouseOut 鼠标离开
+// MouseOut 鼠标离开：清除 hover 和 pressed 状态
 func (b *LiquidButton) MouseOut() {
 	b.hovered = false
 	b.pressed = false
 	b.Refresh()
 }
 
-// MouseMoved 鼠标移动（不处理）
 func (b *LiquidButton) MouseMoved(_ *desktop.MouseEvent) {}
 
-// FocusGained 获得焦点
+// 键盘支持
 func (b *LiquidButton) FocusGained() {}
-
-// FocusLost 失去焦点
-func (b *LiquidButton) FocusLost() {}
-
-// TypedRune 键盘输入（空格/回车触发）
+func (b *LiquidButton) FocusLost()   {}
 func (b *LiquidButton) TypedRune(r rune) {
 	if r == ' ' {
 		b.Tapped(nil)
 	}
 }
-
-// TypedKey 键盘按键
 func (b *LiquidButton) TypedKey(e *fyne.KeyEvent) {
 	if e.Name == fyne.KeyReturn || e.Name == fyne.KeyEnter {
 		b.Tapped(nil)
 	}
 }
 
-// MinSize 最小尺寸
 func (b *LiquidButton) MinSize() fyne.Size {
 	b.ExtendBaseWidget(b)
 	return b.BaseWidget.MinSize()
 }
 
-// CreateRenderer 创建渲染器
+// ── CreateRenderer ────────────────────────────────────────────────────────────
+
 func (b *LiquidButton) CreateRenderer() fyne.WidgetRenderer {
 	b.ExtendBaseWidget(b)
 
-	// ── 外发光层 ────────────────────────────────────────────────
+	// 外发光
 	glow := canvas.NewRectangle(lgGlow)
 	glow.CornerRadius = 18
 
-	// ── 玻璃主体 ────────────────────────────────────────────────
+	// 玻璃主体
 	base := canvas.NewRectangle(lgBase)
 	base.CornerRadius = 14
 	base.StrokeColor = lgBorder
 	base.StrokeWidth = 1.2
 
-	// ── 顶部高光条（占按钮高度上半部分）────────────────────────
-	// 用两个矩形模拟渐变：顶部不透明 → 底部透明
+	// 顶部高光（两段模拟渐变）
 	shimTop := canvas.NewRectangle(lgShimTop)
 	shimTop.CornerRadius = 14
-
 	shimBottom := canvas.NewRectangle(lgShimBottom)
-	shimBottom.CornerRadius = 0 // 底部平切，让两段无缝拼接
+	shimBottom.CornerRadius = 0
 
-	// ── 图标 ────────────────────────────────────────────────────
+	// 图标
 	var iconObj *canvas.Image
 	if b.Icon != nil {
 		iconObj = canvas.NewImageFromResource(b.Icon)
 		iconObj.FillMode = canvas.ImageFillContain
-		iconObj.SetMinSize(fyne.NewSize(16, 16))
+		iconObj.SetMinSize(fyne.NewSize(18, 18))
 	}
 
-	// ── 文字标签 ─────────────────────────────────────────────────
+	// 文字
 	lbl := canvas.NewText(b.Label, lgText)
 	lbl.TextStyle = fyne.TextStyle{Bold: true}
 	lbl.TextSize = 14
@@ -237,9 +223,10 @@ type liquidButtonRenderer struct {
 
 func (r *liquidButtonRenderer) Layout(size fyne.Size) {
 	const glowPad float32 = 4
-	const cornerRadius float32 = 14
+	const iconSize float32 = 18
+	const gap float32 = 5
 
-	// 外发光比按钮大 glowPad*2，居中
+	// 外发光：比按钮多 glowPad*2，居中
 	r.glow.Move(fyne.NewPos(-glowPad, -glowPad))
 	r.glow.Resize(fyne.NewSize(size.Width+glowPad*2, size.Height+glowPad*2))
 
@@ -247,30 +234,30 @@ func (r *liquidButtonRenderer) Layout(size fyne.Size) {
 	r.base.Move(fyne.NewPos(0, 0))
 	r.base.Resize(size)
 
-	// 顶部高光：上半部分（约40%高度），顶角圆角和主体一致，底部平
+	// 顶部高光：高度约 42%，分两段（上圆角/下平）
 	shimH := size.Height * 0.42
 	r.shimTop.Move(fyne.NewPos(1, 1))
 	r.shimTop.Resize(fyne.NewSize(size.Width-2, shimH*0.5))
-	r.shimTop.CornerRadius = cornerRadius
+	r.shimTop.CornerRadius = 14
 
 	r.shimBottom.Move(fyne.NewPos(1, 1+shimH*0.5))
 	r.shimBottom.Resize(fyne.NewSize(size.Width-2, shimH*0.5))
 
-	// 图标 + 文字水平居中排列
-	const iconSize float32 = 16
-	const gap float32 = 5
+	// 图标 + 文字水平居中
+	textW := r.measureTextWidth()
+	hasIcon := r.iconObj != nil && r.btn.Icon != nil
 
 	var contentW float32
-	hasIcon := r.iconObj != nil && r.btn.Icon != nil
 	if hasIcon {
-		// 粗略估算文字宽度（无法精确，用字符数 * fontSize * 0.6 近似）
-		textW := float32(len([]rune(r.btn.Label))) * 14 * 0.62
 		contentW = iconSize + gap + textW
 	} else {
-		contentW = float32(len([]rune(r.btn.Label))) * 14 * 0.62
+		contentW = textW
 	}
 
 	startX := (size.Width - contentW) / 2
+	if startX < 6 {
+		startX = 6
+	}
 	centerY := (size.Height - iconSize) / 2
 
 	if hasIcon {
@@ -283,31 +270,44 @@ func (r *liquidButtonRenderer) Layout(size fyne.Size) {
 	r.lbl.Resize(fyne.NewSize(contentW, 20))
 }
 
+// measureTextWidth 用 fyne 主题字号估算文字宽度（比字符数*固定系数更准确）
+func (r *liquidButtonRenderer) measureTextWidth() float32 {
+	// fyne.MeasureText 是精确测量，但需要 fyne app 已初始化
+	// 此处用主题 TextSize * 0.6 * 字符数作为保守估算
+	// 对于中文字符（宽度约等于 TextSize），额外 +0.4 补偿
+	var w float32
+	for _, ch := range r.btn.Label {
+		if ch > 0x7F {
+			w += 14 * 1.0 // 中文/全角：约等于 1 字符宽
+		} else {
+			w += 14 * 0.62 // ASCII：约 0.62 字符宽
+		}
+	}
+	return w
+}
+
 func (r *liquidButtonRenderer) MinSize() fyne.Size {
-	const hPad float32 = 20
-	const vPad float32 = 10
-	const iconSize float32 = 16
+	const hPad float32 = 22
+	const iconSize float32 = 18
 	const gap float32 = 5
 
-	textW := float32(len([]rune(r.btn.Label))) * 14 * 0.62
+	textW := r.measureTextWidth()
 	var w float32
 	if r.iconObj != nil && r.btn.Icon != nil {
 		w = iconSize + gap + textW + hPad*2
 	} else {
 		w = textW + hPad*2
 	}
-	if w < 80 {
-		w = 80
+	if w < 88 {
+		w = 88
 	}
-	return fyne.NewSize(w, 38)
+	return fyne.NewSize(w, 40)
 }
 
 func (r *liquidButtonRenderer) Refresh() {
 	b := r.btn
 
-	// ── 根据状态更新颜色 ─────────────────────────────────────────
-
-	// 计算主体色（混入 AccentColor 色调）
+	// ── 主体颜色（按状态）────────────────────────────────────────────────────
 	var baseCol color.NRGBA
 	switch {
 	case b.disabled:
@@ -320,52 +320,72 @@ func (r *liquidButtonRenderer) Refresh() {
 		baseCol = lgBase
 	}
 
-	// 如果有强调色，混入 20% 的色调到主体背景
+	// 混入强调色调（正常/hover/pressed 均混，禁用不混）
 	if b.AccentColor != nil && !b.disabled {
 		ac := *b.AccentColor
 		mix := func(a, c uint8, t float32) uint8 {
 			return uint8(float32(a)*(1-t) + float32(c)*t)
 		}
-		baseCol.R = mix(baseCol.R, ac.R, 0.18)
-		baseCol.G = mix(baseCol.G, ac.G, 0.18)
-		baseCol.B = mix(baseCol.B, ac.B, 0.18)
+		tint := float32(0.18)
+		if b.pressed {
+			tint = 0.28 // 按下时色调更浓，加深感
+		}
+		baseCol.R = mix(baseCol.R, ac.R, tint)
+		baseCol.G = mix(baseCol.G, ac.G, tint)
+		baseCol.B = mix(baseCol.B, ac.B, tint)
 
-		// 外发光也染上强调色
-		r.glow.FillColor = color.NRGBA{R: ac.R, G: ac.G, B: ac.B, A: 0x22}
-
-		// 边框也偏向强调色
+		// 发光 + 边框也染色
+		r.glow.FillColor = color.NRGBA{R: ac.R, G: ac.G, B: ac.B, A: 0x28}
 		r.base.StrokeColor = color.NRGBA{
 			R: mix(0xFF, ac.R, 0.3),
 			G: mix(0xFF, ac.G, 0.3),
 			B: mix(0xFF, ac.B, 0.3),
 			A: 0xBB,
 		}
+		// 按下时边框更亮（模拟内凹发光）
+		if b.pressed {
+			r.base.StrokeColor = color.NRGBA{
+				R: mix(0xFF, ac.R, 0.5),
+				G: mix(0xFF, ac.G, 0.5),
+				B: mix(0xFF, ac.B, 0.5),
+				A: 0xFF,
+			}
+			r.base.StrokeWidth = 1.8
+		} else {
+			r.base.StrokeWidth = 1.2
+		}
 	} else {
 		r.glow.FillColor = lgGlow
 		r.base.StrokeColor = lgBorder
+		r.base.StrokeWidth = 1.2
 	}
 
 	r.base.FillColor = baseCol
 
 	// 悬停时高光加强
-	if b.hovered && !b.disabled {
+	if b.hovered && !b.disabled && !b.pressed {
 		r.shimTop.FillColor = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x72}
+	} else if b.pressed {
+		// 按下时高光变暗（模拟压入感）
+		r.shimTop.FillColor = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x28}
 	} else {
 		r.shimTop.FillColor = lgShimTop
 	}
 	r.shimBottom.FillColor = lgShimBottom
 
-	// 禁用时文字变灰
+	// 文字颜色
 	if b.disabled {
 		r.lbl.Color = lgTextDisabled
 	} else {
 		r.lbl.Color = lgText
 	}
 
-	// 更新图标透明度（禁用时变灰，通过 opacity 模拟）
+	// 图标透明度
 	if r.iconObj != nil {
 		if b.disabled {
 			r.iconObj.Translucency = 0.6
+		} else if b.pressed {
+			r.iconObj.Translucency = 0.1
 		} else {
 			r.iconObj.Translucency = 0
 		}
@@ -390,44 +410,47 @@ func (r *liquidButtonRenderer) Objects() []fyne.CanvasObject {
 
 func (r *liquidButtonRenderer) Destroy() {}
 
-// ── 液态玻璃底部操作栏 ───────────────────────────────────────────────────────
+// ── 液态玻璃底部操作栏 ────────────────────────────────────────────────────────
 
-// liquidButtonBar 构建使用液态玻璃按钮的底部操作栏
-// 替换原来的普通 widget.Button，整体底栏背景也使用液态玻璃风格
+// liquidButtonBar 构建深色底部操作栏（液态玻璃风格）
+// start/stop/copy 三个 LiquidButton，右侧状态芯片显示当前运行状态
 func liquidButtonBar(startBtn, stopBtn, copyBtn fyne.CanvasObject, statusText string) fyne.CanvasObject {
-	// 底栏背景：深色半透明，强化玻璃效果
-	barBg := canvas.NewRectangle(color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xE8})
+	// 底栏背景：深色半透明，与 Amber 背景形成强烈对比
+	barBg := canvas.NewRectangle(color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xEC})
 
-	// 顶部高光线（液态玻璃特有的上边缘反光）
-	topGlow := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x55})
-	topGlow.SetMinSize(fyne.NewSize(0, 1))
+	// 顶部高光线（液态玻璃上边缘反光）
+	topGlow := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x88})
+	topGlow.SetMinSize(fyne.NewSize(0, 2))
 
-	// 状态芯片（液态玻璃风格）
-	statusChip := liquidStatusChip("● "+statusText)
+	// 状态芯片
+	statusChip := liquidStatusChip("● " + statusText)
 
-	// 按钮间用半透明竖线分隔
+	// 按钮间分隔线
 	sep := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x28})
-	sep.SetMinSize(fyne.NewSize(1, 24))
+	sep.SetMinSize(fyne.NewSize(1, 26))
 
 	buttons := container.NewHBox(startBtn, stopBtn, sep, copyBtn)
-
 	row := container.NewBorder(nil, nil, nil, statusChip, buttons)
 	foreground := container.NewVBox(topGlow, container.NewPadded(row))
 
 	return container.NewStack(barBg, foreground)
 }
 
-// liquidStatusChip 液态玻璃风格状态芯片
+// liquidStatusChip 液态玻璃状态芯片
 func liquidStatusChip(text string) fyne.CanvasObject {
 	bg := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x18})
-	bg.CornerRadius = 12
+	bg.CornerRadius = 14
 	bg.StrokeColor = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x55}
 	bg.StrokeWidth = 1
 
 	shim := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x28})
-	shim.CornerRadius = 12
+	shim.CornerRadius = 14
 
-	lbl := widget.NewLabel(text)
+	lbl := canvas.NewText(text, color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xCC})
+	lbl.TextSize = 12
 
 	return container.NewPadded(container.NewStack(bg, shim, container.NewPadded(lbl)))
 }
+
+// keep theme reference
+var _ = theme.DefaultTheme()

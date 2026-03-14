@@ -7,51 +7,45 @@ import (
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
 )
 
-// SelectCourse 选课
+// SelectCourse 选课（正方 V9）
+//
+// 请求次数：仅发 1 次 POST 到选课提交接口。
+// 初始化参数（xkkz_id 等）由 GetClassList 调用时已从选课首页提取并缓存在 course 对象中，
+// 此处不再重复 GET 首页 + POST display，避免每次选课发 3~4 个请求。
+//
+// 正方 V9 关键点：
+//   - 必须使用 do_jxb_id（加密长 ID），不能用短 jxb_id
+//   - 所有接口 URL 需带 ?gnmkdm=N253512
 func (c *Client) SelectCourse(course *model.Course) error {
-	// 步骤1: 获取选课页参数
-	indexURL := c.buildURL("/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
-	indexHTML, err := c.doGet(indexURL)
+	params := c.buildSelectParams(course)
+
+	selectURL := c.buildURL(pathSelectSubmit) + "?gnmkdm=" + gnmkdmSelect
+	resp, err := c.doPost(selectURL, params)
 	if err != nil {
 		return err
 	}
 
-	postData1 := c.parseHiddenInputs(indexHTML)
-
-	// 步骤2: 获取更多参数
-	displayURL := c.buildURL("/xsxk/zzxkyzb_cxZzxkYzbDisplay.html")
-	_, err = c.doPost(displayURL, postData1)
-	if err != nil {
-		return err
-	}
-
-	// 步骤3: 构建选课参数
-	postData2 := c.buildSelectParams(postData1, course)
-
-	// 步骤4: 提交选课请求
-	selectURL := c.buildURL("/xsxk/zzxkyzb_tjZzxkYzb.html")
-	resp, err := c.doPost(selectURL, postData2)
-	if err != nil {
-		return err
-	}
-
-	// 步骤5: 解析响应
 	return c.parseSelectResult(resp)
 }
 
-// buildSelectParams 构建选课参数
-func (c *Client) buildSelectParams(baseParams map[string]string, course *model.Course) map[string]string {
-	params := make(map[string]string)
-
-	// 复制基础参数
-	for k, v := range baseParams {
-		params[k] = v
+// buildSelectParams 构建选课提交参数
+//
+// 正方 V9 必须使用 do_jxb_id（加密长 ID），存于 course.Extra.DoJxbID，
+// 该值由 robber.go 在调用 SelectCourse 之前通过 GetClassInfo 获取并缓存。
+func (c *Client) buildSelectParams(course *model.Course) map[string]string {
+	params := map[string]string{
+		"kch_id":  course.ID,
+		"kcmc":    course.Name,
+		"kklxdm":  course.Type,
+		"gnmkdm":  gnmkdmSelect,
 	}
 
-	// 设置选课参数
-	params["kch_id"] = course.ID
-	params["jxb_id"] = course.ClassID
-	params["kklxdm"] = course.Type
+	// do_jxb_id：V9 使用加密长 ID；Extra 未取到时降级使用短 jxb_id
+	if course.Extra != nil && course.Extra.DoJxbID != "" {
+		params["jxb_ids"] = course.Extra.DoJxbID
+	} else {
+		params["jxb_ids"] = course.ClassID
+	}
 
 	return params
 }
@@ -67,7 +61,6 @@ func (c *Client) parseSelectResult(resp string) error {
 		return fmt.Errorf("解析选课结果失败: %w", err)
 	}
 
-	// 检查flag（成功标志）
 	if result.Flag == "1" {
 		return nil
 	}
@@ -77,15 +70,14 @@ func (c *Client) parseSelectResult(resp string) error {
 
 // QuerySelectedCourse 查询已选课程
 func (c *Client) QuerySelectedCourse() (*model.CourseList, error) {
-	// 调用查询已选课程接口
-	url := c.buildURL("/xsxk/zzxkyzb_cxYxkAndKc.html")
+	queryURL := c.buildURL(pathSelectedCourses) + "?gnmkdm=" + gnmkdmSelect
 
-	// 构建查询参数
 	params := map[string]string{
-		"flag": "1", // 1=查询已选
+		"flag":    "1",
+		"gnmkdm": gnmkdmSelect,
 	}
 
-	resp, err := c.doPost(url, params)
+	resp, err := c.doPost(queryURL, params)
 	if err != nil {
 		return nil, err
 	}
@@ -95,16 +87,15 @@ func (c *Client) QuerySelectedCourse() (*model.CourseList, error) {
 
 // CancelCourse 退课
 func (c *Client) CancelCourse(course *model.Course) error {
-	// 调用退课接口
-	url := c.buildURL("/xsxk/zzxkyzb_tkZzxkYzb.html")
+	cancelURL := c.buildURL(pathCancelCourse) + "?gnmkdm=" + gnmkdmSelect
 
-	// 构建退课参数
 	params := map[string]string{
-		"kch_id": course.ID,
-		"jxb_id": course.ClassID,
+		"kch_id":  course.ID,
+		"jxb_ids": course.ClassID,
+		"gnmkdm": gnmkdmSelect,
 	}
 
-	resp, err := c.doPost(url, params)
+	resp, err := c.doPost(cancelURL, params)
 	if err != nil {
 		return err
 	}

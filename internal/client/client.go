@@ -23,6 +23,45 @@ var browserHeaders = map[string]string{
 	"Connection":      "keep-alive",
 }
 
+// nodeURLMap 节点显示名 → 真实 Base URL 的映射表
+//
+// 外网节点（1-5）均指向 jwxt.gcc.edu.cn HTTPS；
+// 内网节点（6-13）指向校园网内负载均衡地址（明文 HTTP，仅校园网可达）。
+var nodeURLMap = map[string]string{
+	// 外网 HTTPS 节点（校外/VPN 均可用，推荐）
+	"节点1（推荐）": "https://jwxt.gcc.edu.cn",
+	"节点2（推荐）": "https://jwxt.gcc.edu.cn",
+	"节点3（推荐）": "https://jwxt.gcc.edu.cn",
+	"节点4（外网）": "https://jwxt.gcc.edu.cn",
+	"节点5（外网）": "https://jwxt.gcc.edu.cn",
+	// 校园内网 HTTP 节点（⚠️ 明文传输，仅在校园网内可用，共 8 个负载均衡地址）
+	"节点6（内网）":  "http://172.22.14.1",
+	"节点7（内网）":  "http://172.22.14.2",
+	"节点8（内网）":  "http://172.22.14.3",
+	"节点9（内网）":  "http://172.22.14.4",
+	"节点10（内网）": "http://172.22.14.5",
+	"节点11（内网）": "http://172.22.14.6",
+	"节点12（内网）": "http://172.22.14.7",
+	"节点13（内网）": "http://172.22.14.8",
+}
+
+// NodeURLFromName 将节点显示名翻译为真实 Base URL（供外部包调用，例如 UI 层判断 HTTP/HTTPS）
+//
+// 找不到时返回默认外网节点 URL，不 panic、不返回 error —— 调用方只需拿到 URL 判断协议即可。
+func NodeURLFromName(name string) string {
+	if u, ok := nodeURLMap[name]; ok {
+		return u
+	}
+	// 节点名匹配失败（空字符串或未知名称）时 fallback 到节点1；
+	// 此处不静默：调用方若依赖具体节点（如内网节点），需确保名称与 map key 一致。
+	return nodeURLMap["节点1（推荐）"]
+}
+
+// getNodeURL 内部使用：节点名 → Base URL（对 NodeURLFromName 的别名封装）
+func getNodeURL(node string) string {
+	return NodeURLFromName(node)
+}
+
 // Client HTTP客户端
 type Client struct {
 	httpClient *http.Client
@@ -32,16 +71,15 @@ type Client struct {
 
 // NewClient 创建客户端
 //
-// agentURL 为可选的 HTTP 代理地址（来自 UI 的 AgentEntry），空字符串表示不使用代理。
+// nodeURL 为节点显示名（如 "节点1（推荐）"）或直接的 Base URL。
 // CookieJar 在此初始化，确保登录后的 Session Cookie 能跨请求保持。
 func NewClient(nodeURL string) *Client {
-	// 初始化 CookieJar（内存存储，程序退出即清除，不写磁盘）
 	jar, _ := cookiejar.New(nil)
 
 	return &Client{
 		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
-			Jar:       jar,
+			Timeout: 30 * time.Second,
+			Jar:     jar,
 		},
 		baseURL:   getNodeURL(nodeURL),
 		cookieJar: jar,
@@ -50,7 +88,7 @@ func NewClient(nodeURL string) *Client {
 
 // NewClientWithProxy 创建带代理的客户端
 //
-// agentURL 格式示例：http://127.0.0.1:8080
+// agentURL 格式示例：http://127.0.0.1:8080，空字符串表示不使用代理。
 // 代理地址仅在内存中使用，不持久化。
 func NewClientWithProxy(nodeURL, agentURL string) *Client {
 	jar, _ := cookiejar.New(nil)
@@ -71,24 +109,6 @@ func NewClientWithProxy(nodeURL, agentURL string) *Client {
 		baseURL:   getNodeURL(nodeURL),
 		cookieJar: jar,
 	}
-}
-
-// getNodeURL 获取节点URL
-func getNodeURL(node string) string {
-	nodes := map[string]string{
-		"节点1（推荐）": "https://jwxt.example.com",
-		"节点2（推荐）": "https://jwxt2.example.com",
-		"节点3（推荐）": "https://jwxt3.example.com",
-		"节点4（外网）": "https://jwxt4.example.com",
-		"节点5（外网）": "https://jwxt5.example.com",
-		"节点6（内网）": "http://jwxt6.example.com",
-		"节点7（内网）": "http://jwxt7.example.com",
-	}
-
-	if nodeURL, ok := nodes[node]; ok {
-		return nodeURL
-	}
-	return nodes["节点1（推荐）"]
 }
 
 // applyBrowserHeaders 将标准浏览器请求头批量注入请求
@@ -121,6 +141,11 @@ func (c *Client) doGet(rawURL string) (string, error) {
 }
 
 // doPost POST请求（注入浏览器请求头，包含 Referer 和 Origin 防 CSRF 校验失败）
+//
+// Referer 修复说明：
+//   正方 V9 所有选课接口均在 /jwglxt/ 路径下，Referer 必须携带 /jwglxt 前缀，
+//   否则服务端 Referer 检查可能返回 403 或重定向到登录页。
+//   之前写的 "/xsxk/zzxkyzb_cxZzxkYzbIndex.html" 缺少 "/jwglxt" 导致 Referer 校验失败。
 func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	values := url.Values{}
 	for k, v := range data {
@@ -133,9 +158,8 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	}
 	applyBrowserHeaders(req)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Referer 指向本站选课首页，通过教务系统的 Referer 来源检查
-	req.Header.Set("Referer", c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
-	// Origin 标明请求来源域名，防止 CSRF 防护拒绝无来源的请求
+	// ✅ 修复：Referer 路径补全 /jwglxt 前缀（正方 V9 要求）
+	req.Header.Set("Referer", c.baseURL+"/jwglxt/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
 	req.Header.Set("Origin", c.baseURL)
 
 	resp, err := c.httpClient.Do(req)
@@ -160,7 +184,8 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	}
 	applyBrowserHeaders(req)
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Referer", c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
+	// ✅ 修复：Referer 路径补全 /jwglxt 前缀
+	req.Header.Set("Referer", c.baseURL+"/jwglxt/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
 	req.Header.Set("Origin", c.baseURL)
 
 	resp, err := c.httpClient.Do(req)

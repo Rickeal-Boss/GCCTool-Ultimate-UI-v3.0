@@ -6,6 +6,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
@@ -19,26 +20,27 @@ import (
 
 // App 应用程序
 type App struct {
-	app     fyne.App
-	window  fyne.Window
-	ui      *model.UIComponents
-	client  *client.Client
-	robber  *robber.Robber
-	logger  *logger.Logger
+	app    fyne.App
+	window fyne.Window
+	ui     *model.UIComponents
+	client *client.Client
+	robber *robber.Robber
+	logger *logger.Logger
 
-	// 液态玻璃按钮（替代 ui.StartBtn / ui.StopBtn / ui.CopyLogBtn）
+	// 液态玻璃操作按钮
 	startLiquid *LiquidButton
 	stopLiquid  *LiquidButton
 	copyLiquid  *LiquidButton
+
+	// 状态芯片文字（底部栏右侧）
+	statusLabel *canvas.Text
 }
 
-// NewApp 创建应用
+// NewApp 创建并初始化应用
 func NewApp() *App {
 	a := &App{
 		app: app.New(),
 	}
-
-	// 应用黄色背景 Material 主题
 	a.app.Settings().SetTheme(&materialYellowTheme{})
 
 	a.initWindow()
@@ -51,20 +53,22 @@ func NewApp() *App {
 	return a
 }
 
-// initWindow 初始化窗口
+// ── 初始化 ────────────────────────────────────────────────────────────────────
+
 func (a *App) initWindow() {
-	a.window = a.app.NewWindow("GCC课程选课助手 V3.0")
-	a.window.Resize(fyne.NewSize(900, 700))
+	a.window = a.app.NewWindow("GCC 课程选课助手  V3.0")
+	// 960×700：横向更宽，Tab 内字段行有足够空间展开
+	a.window.Resize(fyne.NewSize(960, 700))
 	a.window.SetFixedSize(false)
 	a.window.CenterOnScreen()
 	a.window.SetIcon(theme.ComputerIcon())
 }
 
-// initComponents 初始化UI组件
 func (a *App) initComponents() {
 	a.ui = model.NewUIComponents()
 
-	// 初始化节点选择
+	// ── 节点列表 ──────────────────────────────────────────────────────────
+	// 节点1-5：外网 HTTPS（推荐）；节点6-13：校园内网 HTTP（172.22.14.1~8）
 	a.ui.NodeSelect.Options = []string{
 		"节点1（推荐）",
 		"节点2（推荐）",
@@ -73,12 +77,18 @@ func (a *App) initComponents() {
 		"节点5（外网）",
 		"节点6（内网）",
 		"节点7（内网）",
+		"节点8（内网）",
+		"节点9（内网）",
+		"节点10（内网）",
+		"节点11（内网）",
+		"节点12（内网）",
+		"节点13（内网）",
 	}
 
-	// 初始化课程类型
+	// ── 课程类型 ──────────────────────────────────────────────────────────
 	a.ui.CourseTypeRadio.Options = []string{"普通网课", "体育课", "普通课"}
 
-	// 初始化分类复选框
+	// ── 分类复选框 ────────────────────────────────────────────────────────
 	labels := []string{
 		"科技类", "人文类", "经营类",
 		"体育类", "创新创业类", "艺术类",
@@ -88,16 +98,12 @@ func (a *App) initComponents() {
 		a.ui.CategoryChecks[i] = widget.NewCheck(label, nil)
 	}
 
-	// 初始化按钮
 	a.initButtons()
-
-	// 设置默认值
 	setDefaults(a.ui)
 }
 
-// initButtons 初始化液态玻璃风格按钮
 func (a *App) initButtons() {
-	// 启动按钮：绿色强调
+	// ── 启动按钮：绿色 ────────────────────────────────────────────────────
 	a.startLiquid = NewLiquidButtonWithAccent(
 		"启动",
 		theme.MediaPlayIcon(),
@@ -105,7 +111,7 @@ func (a *App) initButtons() {
 		func() { a.onStartClicked() },
 	)
 
-	// 停止按钮：红色强调，初始禁用
+	// ── 停止按钮：红色，初始禁用 ──────────────────────────────────────────
 	a.stopLiquid = NewLiquidButtonWithAccent(
 		"停止",
 		theme.MediaStopIcon(),
@@ -114,14 +120,13 @@ func (a *App) initButtons() {
 	)
 	a.stopLiquid.Disable()
 
-	// 拷贝日志按钮：蓝色强调
+	// ── 复制日志按钮：蓝色 ────────────────────────────────────────────────
 	a.copyLiquid = NewLiquidButtonWithAccent(
-		"拷贝日志",
+		"复制日志",
 		theme.ContentCopyIcon(),
 		color.NRGBA{R: 0x19, G: 0x76, B: 0xD2, A: 0xFF},
 		func() {
-			// 安全提示：日志包含学号、选课行为等个人信息
-			// 剪贴板是系统共享资源，第三方程序可读取，云剪贴板会上传到云端
+			// 日志含学号/行为信息，复制前提示
 			dialog.ShowConfirm(
 				"安全提示",
 				"日志中包含您的学号及选课行为信息。\n\n"+
@@ -135,7 +140,7 @@ func (a *App) initButtons() {
 					if a.logger.Copy() {
 						dialog.ShowInformation("已复制", "日志已复制到剪贴板，请用完后及时清空。", a.window)
 					} else {
-						dialog.ShowInformation("错误", "日志复制失败", a.window)
+						dialog.ShowInformation("复制失败", "日志为空或复制失败，请重试。", a.window)
 					}
 				},
 				a.window,
@@ -143,88 +148,76 @@ func (a *App) initButtons() {
 		},
 	)
 
-	// 同步到 UIComponents（model 包保留字段，但实际 UI 使用 LiquidButton）
-	// widget.Button 仅作占位，不参与实际渲染
+	// widget.Button 占位（保持 UIComponents 字段兼容，不参与实际渲染）
 	a.ui.StartBtn = widget.NewButton("", nil)
 	a.ui.StopBtn = widget.NewButton("", nil)
 	a.ui.CopyLogBtn = widget.NewButton("", nil)
 }
 
-// initLogger 初始化日志
 func (a *App) initLogger() {
 	a.logger = logger.NewLogger(a.ui)
 }
 
-// initClient 初始化客户端
 func (a *App) initClient() {
 	a.client = client.NewClientWithProxy(a.ui.NodeSelect.Selected, a.ui.AgentEntry.Text)
 }
 
-// initRobber 初始化抢课调度器
 func (a *App) initRobber() {
 	a.robber = robber.NewRobber(a.client, a.logger)
 }
 
-// buildUI 构建UI
+// ── UI 构建 ───────────────────────────────────────────────────────────────────
+
 func (a *App) buildUI() {
-	content := a.buildMainLayout()
-	a.window.SetContent(content)
+	a.window.SetContent(a.buildMainLayout())
 }
 
-// buildMainLayout 构建主布局
 func (a *App) buildMainLayout() *fyne.Container {
-	// 标题横幅
 	titleBanner := a.buildTitleCard()
 
-	// Tab容器
 	tabs := container.NewAppTabs(
 		container.NewTabItem("基础配置", a.buildConfigTab()),
 		container.NewTabItem("高级设置", a.buildAdvancedTab()),
 		container.NewTabItem("运行日志", a.buildLogTab()),
 	)
+	tabs.SetTabLocation(container.TabLocationTop)
 
-	// 底部按钮栏
 	buttonBar := a.buildButtonBar()
 
 	return container.NewBorder(titleBanner, buttonBar, nil, nil, tabs)
 }
 
-// buildTitleCard 构建标题横幅（Material 风格）
 func (a *App) buildTitleCard() fyne.CanvasObject {
 	return buildTitleBanner()
 }
 
-// buildConfigTab 构建配置Tab（可上下滚动，解决内容溢出布局混乱）
+// buildConfigTab 基础配置 Tab（可滚动）
 func (a *App) buildConfigTab() *fyne.Container {
 	content := container.NewVBox(
 		a.buildAuthCard(),
 		a.buildNodeCard(),
 		a.buildTimeCard(),
 	)
-	scroll := container.NewVScroll(content)
-	return container.NewPadded(scroll)
+	return container.NewPadded(container.NewVScroll(content))
 }
 
-// buildAdvancedTab 构建高级设置Tab（可上下滚动，解决布局冲突）
+// buildAdvancedTab 高级设置 Tab（可滚动）
 func (a *App) buildAdvancedTab() *fyne.Container {
 	content := container.NewVBox(
 		a.buildCourseTypeCard(),
 		a.buildCategoryCard(),
 		a.buildFilterCard(),
 	)
-	scroll := container.NewVScroll(content)
-	return container.NewPadded(scroll)
+	return container.NewPadded(container.NewVScroll(content))
 }
 
-// buildLogTab 构建日志Tab（Material 风格，日志区填满剩余空间）
-//
-// 不使用 materialCard 的 VBox 内容包装（VBox 不会拉伸子元素），
-// 改为 container.NewBorder：标题行固定在顶，LogScroll 填充所有剩余高度。
+// buildLogTab 日志 Tab
 func (a *App) buildLogTab() *fyne.Container {
 	return container.NewPadded(buildLogPanel("运行日志", 6, a.ui.LogScroll))
 }
 
-// buildAuthCard 构建账号卡片（Material 风格）
+// ── 卡片构建 ──────────────────────────────────────────────────────────────────
+
 func (a *App) buildAuthCard() fyne.CanvasObject {
 	content := container.NewVBox(
 		mdFieldRow("账号", a.ui.UsernameEntry),
@@ -234,17 +227,20 @@ func (a *App) buildAuthCard() fyne.CanvasObject {
 	return materialCard("账号信息", 0, content)
 }
 
-// buildNodeCard 构建节点卡片（Material 风格）
 func (a *App) buildNodeCard() fyne.CanvasObject {
+	// 节点选择 + 节点说明提示
+	nodeHint := canvas.NewText("节点1-5 HTTPS 校外可用；节点6-13 HTTP 仅校内可用", mdDisabled)
+	nodeHint.TextSize = 11
+
 	content := container.NewVBox(
-		mdFieldRow("选择节点", a.ui.NodeSelect),
+		mdFieldRow("服务节点", a.ui.NodeSelect),
+		container.NewPadded(nodeHint),
 		mdSectionDivider(),
-		mdFieldRow("代理地址", a.ui.AgentEntry),
+		mdFieldRow("HTTP 代理", a.ui.AgentEntry),
 	)
 	return materialCard("网络配置", 1, content)
 }
 
-// buildTimeCard 构建时间卡片（Material 风格）
 func (a *App) buildTimeCard() fyne.CanvasObject {
 	timeRow := container.NewHBox(
 		a.ui.HourEntry, widget.NewLabel("时"),
@@ -253,63 +249,73 @@ func (a *App) buildTimeCard() fyne.CanvasObject {
 	advRow := container.NewHBox(a.ui.AdvanceEntry, widget.NewLabel("分钟"))
 	threadRow := container.NewHBox(a.ui.ThreadEntry, widget.NewLabel("个"))
 
+	// 线程数提示
+	threadHint := canvas.NewText("建议 5~15，过高会触发服务端限流", mdDisabled)
+	threadHint.TextSize = 11
+
 	content := container.NewVBox(
-		mdFieldRow("系统选课时间", timeRow),
+		mdFieldRow("选课时间", timeRow),
 		mdSectionDivider(),
 		mdFieldRow("提前开抢", advRow),
 		mdSectionDivider(),
-		mdFieldRow("线程数", threadRow),
+		mdFieldRow("并发线程", threadRow),
+		container.NewPadded(threadHint),
 	)
-	return materialCard("时间设置", 2, content)
+	return materialCard("时间与线程", 2, content)
 }
 
-// buildCourseTypeCard 构建课程类型卡片（Material 风格）
 func (a *App) buildCourseTypeCard() fyne.CanvasObject {
 	return materialCard("课程类型", 3, a.ui.CourseTypeRadio)
 }
 
-// buildCategoryCard 构建分类卡片（Material 风格）
 func (a *App) buildCategoryCard() fyne.CanvasObject {
 	checks := make([]fyne.CanvasObject, 9)
 	for i, check := range a.ui.CategoryChecks {
 		checks[i] = check
 	}
-	return materialCard("课程分类", 4, container.NewGridWithColumns(3, checks...))
+	return materialCard("课程分类（多选）", 4, container.NewGridWithColumns(3, checks...))
 }
 
-// buildFilterCard 构建筛选卡片（Material 风格）
 func (a *App) buildFilterCard() fyne.CanvasObject {
 	creditRow := container.NewHBox(a.ui.MinCreditEntry, widget.NewLabel("分"))
+
 	content := container.NewVBox(
 		mdFieldRow("最低学分", creditRow),
 		mdSectionDivider(),
 		mdFieldRow("课程名称", a.ui.CourseNameEntry),
 		mdSectionDivider(),
-		mdFieldRow("老师姓名", a.ui.TeacherEntry),
+		mdFieldRow("教师姓名", a.ui.TeacherEntry),
 		mdSectionDivider(),
 		mdFieldRow("课程编号", a.ui.CourseNumEntry),
 	)
 	return materialCard("筛选条件", 5, content)
 }
 
-// buildButtonBar 构建底部液态玻璃操作栏
+// buildButtonBar 底部液态玻璃操作栏
+// statusLabel 由 a.statusLabel 持有，可在运行时动态更新
 func (a *App) buildButtonBar() fyne.CanvasObject {
-	return liquidButtonBar(a.startLiquid, a.stopLiquid, a.copyLiquid, "就绪")
+	a.statusLabel = canvas.NewText("● 就绪", color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xCC})
+	a.statusLabel.TextSize = 12
+
+	return buildDynamicButtonBar(a.startLiquid, a.stopLiquid, a.copyLiquid, a.statusLabel)
 }
 
-// onStartClicked 启动按钮点击
+// ── 事件处理 ──────────────────────────────────────────────────────────────────
+
 func (a *App) onStartClicked() {
 	cfg := a.ui.GetConfig()
 
-	// 验证配置
 	if cfg.Username == "" || cfg.Password == "" {
 		dialog.ShowError(fmt.Errorf("请输入账号和密码"), a.window)
 		return
 	}
 
-	// H1：HTTP 内网节点安全警告
-	// 纯 HTTP 链路下 Session Cookie 明文传输，同网段可被截获劫持
-	if len(cfg.NodeURL) >= 7 && cfg.NodeURL[:7] == "http://" {
+	// HTTP 内网节点安全警告
+	// ⚠️ 注意：cfg.NodeURL 存的是节点显示名（如"节点6（内网）"），不是真实 URL，
+	// 必须先通过 client.NodeURLFromName 翻译成真实 Base URL 再判断 http:// 前缀，
+	// 否则判断永远不成立（节点名不以 "http://" 开头）。
+	realURL := client.NodeURLFromName(cfg.NodeURL)
+	if len(realURL) >= 7 && realURL[:7] == "http://" {
 		dialog.ShowConfirm(
 			"⚠️ 不安全的网络连接",
 			"当前选择的节点使用 HTTP（明文）传输。\n\n"+
@@ -317,6 +323,7 @@ func (a *App) onStartClicked() {
 				"ARP 欺骗截获您的 Session Cookie，\n"+
 				"等同于账号被盗。\n\n"+
 				"建议切换到 HTTPS 节点（节点1-5）。\n"+
+				"内网节点（节点6-13）仅在校园网内可用。\n"+
 				"确定仍要使用当前内网节点继续？",
 			func(ok bool) {
 				if !ok {
@@ -332,25 +339,21 @@ func (a *App) onStartClicked() {
 	a.doStartRobbery(cfg)
 }
 
-// doStartRobbery 实际执行启动逻辑（抽取公共部分，避免代码重复）
 func (a *App) doStartRobbery(cfg *model.Config) {
-	// 禁用输入
+	// 禁用所有输入，切换按钮状态
 	disableInputs(a.ui, true)
-
-	// 启用停止按钮，禁用启动按钮
 	a.stopLiquid.Enable()
 	a.startLiquid.Disable()
 
-	// 清空日志
-	a.logger.Clear()
+	// 更新状态芯片
+	a.setStatus("● 登录中...", color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF})
 
+	a.logger.Clear()
 	a.logger.Info("开始抢课任务...")
 
-	// 启动抢课
 	go func() {
 		defer func() {
-			// 主动清零密码：用 []byte 原地覆写，确保旧值不在堆上残留
-			// Go 的 string 不可变，直接赋值不覆写底层内存；需先转 []byte 再逐字节置零
+			// 密码原地清零（防止堆栈/内存残留）
 			if len(cfg.Password) > 0 {
 				b := []byte(cfg.Password)
 				for i := range b {
@@ -361,42 +364,56 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 
 			if r := recover(); r != nil {
 				a.logger.Error(fmt.Sprintf("抢课任务异常: %v", r))
-				disableInputs(a.ui, false)
-				a.stopLiquid.Disable()
-				a.startLiquid.Enable()
+				a.resetUIAfterStop()
 			}
 		}()
 
-		// 重新创建客户端（使用当前节点和代理配置）
+		// 重建客户端（使用当前节点 + 代理）
 		a.client = client.NewClientWithProxy(cfg.NodeURL, cfg.Agent)
 		a.robber = robber.NewRobber(a.client, a.logger)
 
-		// 开始抢课
 		if err := a.robber.Start(cfg); err != nil {
 			a.logger.Error(fmt.Sprintf("启动失败: %v", err))
-			disableInputs(a.ui, false)
-			a.stopLiquid.Disable()
-			a.startLiquid.Enable()
+			a.resetUIAfterStop()
+			return
 		}
+
+		// Start() 登录成功后立即返回，更新状态为"抢课中"
+		a.setStatus("● 抢课中", color.NRGBA{R: 0x43, G: 0xA0, B: 0x47, A: 0xFF})
 	}()
 }
 
-// onStopClicked 停止按钮点击
 func (a *App) onStopClicked() {
 	a.logger.Info("正在停止抢课...")
 	a.robber.Stop()
+	a.resetUIAfterStop()
+}
 
+// resetUIAfterStop 停止后恢复 UI 状态
+func (a *App) resetUIAfterStop() {
 	disableInputs(a.ui, false)
 	a.stopLiquid.Disable()
 	a.startLiquid.Enable()
+	a.setStatus("● 已停止", color.NRGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF})
 }
 
-// Run 运行应用
+// setStatus 更新底部状态芯片文字和颜色
+func (a *App) setStatus(text string, col color.NRGBA) {
+	if a.statusLabel == nil {
+		return
+	}
+	a.statusLabel.Text = text
+	a.statusLabel.Color = col
+	a.statusLabel.Refresh()
+}
+
+// Run 启动应用主循环
 func (a *App) Run() {
 	a.window.ShowAndRun()
 }
 
-// setDefaults 设置默认值
+// ── 辅助函数 ──────────────────────────────────────────────────────────────────
+
 func setDefaults(ui *model.UIComponents) {
 	ui.HourEntry.SetText("12")
 	ui.MinuteEntry.SetText("30")
@@ -407,7 +424,6 @@ func setDefaults(ui *model.UIComponents) {
 	ui.MinCreditEntry.SetText("2")
 }
 
-// disableInputs 禁用/启用输入框
 func disableInputs(ui *model.UIComponents, disabled bool) {
 	entries := []interface {
 		Enable()
@@ -443,4 +459,29 @@ func disableInputs(ui *model.UIComponents, disabled bool) {
 			check.Enable()
 		}
 	}
+}
+
+// buildDynamicButtonBar 动态底部栏（statusLabel 外部持有，可运行时更新）
+func buildDynamicButtonBar(startBtn, stopBtn, copyBtn fyne.CanvasObject, statusLbl *canvas.Text) fyne.CanvasObject {
+	barBg := canvas.NewRectangle(color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xEC})
+
+	topGlow := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x88})
+	topGlow.SetMinSize(fyne.NewSize(0, 2))
+
+	// 状态芯片背景
+	chipBg := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x18})
+	chipBg.CornerRadius = 14
+	chipBg.StrokeColor = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x44}
+	chipBg.StrokeWidth = 1
+
+	statusChip := container.NewPadded(container.NewStack(chipBg, container.NewPadded(statusLbl)))
+
+	sep := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x28})
+	sep.SetMinSize(fyne.NewSize(1, 26))
+
+	buttons := container.NewHBox(startBtn, stopBtn, sep, copyBtn)
+	row := container.NewBorder(nil, nil, nil, statusChip, buttons)
+	foreground := container.NewVBox(topGlow, container.NewPadded(row))
+
+	return container.NewStack(barBg, foreground)
 }

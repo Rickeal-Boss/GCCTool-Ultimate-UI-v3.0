@@ -1,5 +1,14 @@
 package ui
 
+// material_card.go — Material Design 3 风格卡片与辅助控件
+//
+// 原则：
+//   - 所有布局用 Fyne 内置 container（Border / Stack / HBox / VBox / Grid），
+//     不再自定义 fyne.Layout，避免 resize 时递归重布局
+//   - 卡片白色背景 + 左侧彩色强调条 + 圆角 + 投影，形成明确的视觉层次
+//   - 标题行带语义小色块，内容区用 Padded 包裹留出呼吸感
+//   - 所有废弃的自定义 layout（bannerLayout / barLayout / chipLayout）已删除
+
 import (
 	"image/color"
 
@@ -10,7 +19,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// mdAccentColors Material 卡片左侧强调色（每种卡片独立颜色）
+// ── 卡片强调色（每种卡片独立，形成视觉区分）────────────────────────────────
 var mdAccentColors = []color.NRGBA{
 	{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF}, // Amber  — 账号信息
 	{R: 0x19, G: 0x76, B: 0xD2, A: 0xFF}, // Blue   — 网络配置
@@ -21,51 +30,56 @@ var mdAccentColors = []color.NRGBA{
 	{R: 0xF5, G: 0x7C, B: 0x00, A: 0xFF}, // Orange — 运行日志
 }
 
-// materialCard 构建 Material Design 风格卡片
+// ── materialCard 标准内容卡片 ────────────────────────────────────────────────
 //
-//	title     — 卡片标题
-//	accentIdx — 左侧强调色索引（使用 mdAccentColors）
+//	title     — 卡片标题（空字符串则不显示标题行）
+//	accentIdx — 左侧强调条颜色索引
 //	content   — 卡片内容
 //
-// 性能优化：使用 container.NewStack（Fyne 内置，无自定义 layout 递归）
-// 替代原先的 shadowLayout + cardStackLayout 双层自定义布局，
-// 大幅降低窗口 resize 时的重布局开销，消除卡顿。
+// 布局层次（底→顶）：
+//
+//	shadowRect  — 投影矩形（偏移 2px，深色半透明）
+//	bg          — 白色圆角背景
+//	accentBar   — 左侧 4px 彩色条
+//	header+content — 标题行 + 内容
 func materialCard(title string, accentIdx int, content fyne.CanvasObject) fyne.CanvasObject {
 	accent := mdAccentColors[accentIdx%len(mdAccentColors)]
 
-	// ── 卡片白色背景（带圆角）────────────────────────────────────
-	bg := canvas.NewRectangle(color.White)
+	// ── 投影层（比卡片大 2px，右下偏移，模拟 dp2 阴影）────────────────────
+	shadowRect := canvas.NewRectangle(color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x14})
+	shadowRect.CornerRadius = 10
+
+	// ── 白色卡片背景 ──────────────────────────────────────────────────────────
+	bg := canvas.NewRectangle(mdSurface)
 	bg.CornerRadius = 8
-	bg.StrokeColor = color.NRGBA{R: 0xE0, G: 0xE0, B: 0xE0, A: 0xFF}
+	bg.StrokeColor = color.NRGBA{R: 0xE8, G: 0xE8, B: 0xE8, A: 0xFF}
 	bg.StrokeWidth = 1
 
-	// ── 左侧彩色强调条 ────────────────────────────────────────────
+	// ── 左侧彩色强调条（4px 宽，顶部圆角，底部平）─────────────────────────
 	accentBar := canvas.NewRectangle(accent)
 	accentBar.CornerRadius = 4
 	accentBar.SetMinSize(fyne.NewSize(4, 0))
 
-	// ── 标题行 ────────────────────────────────────────────────────
+	// ── 标题行 ────────────────────────────────────────────────────────────────
 	var header fyne.CanvasObject
 	if title != "" {
-		titleLabel := widget.NewLabelWithStyle(
-			title,
-			fyne.TextAlignLeading,
-			fyne.TextStyle{Bold: true},
-		)
-		// 标题下方分割线
+		// 语义色块：12×12 圆角正方形，与卡片强调色一致
+		dot := canvas.NewRectangle(accent)
+		dot.CornerRadius = 3
+		dot.SetMinSize(fyne.NewSize(12, 12))
+
+		titleLabel := widget.NewRichTextFromMarkdown("**" + title + "**")
+
+		// 标题下方轻量分割线
 		divider := canvas.NewRectangle(color.NRGBA{R: 0xF0, G: 0xF0, B: 0xF0, A: 0xFF})
 		divider.SetMinSize(fyne.NewSize(0, 1))
 
-		// 标题左侧小色块装饰
-		dot := canvas.NewRectangle(accent)
-		dot.CornerRadius = 2
-		dot.SetMinSize(fyne.NewSize(12, 12))
-
-		titleRow := container.NewHBox(dot, titleLabel)
+		titleRow := container.NewBorder(nil, nil, container.NewPadded(dot), nil,
+			container.NewPadded(titleLabel))
 		header = container.NewVBox(titleRow, divider)
 	}
 
-	// ── 内容区（带内边距）────────────────────────────────────────
+	// ── 内容区 ────────────────────────────────────────────────────────────────
 	var innerContent fyne.CanvasObject
 	if header != nil {
 		innerContent = container.NewVBox(header, container.NewPadded(content))
@@ -73,138 +87,139 @@ func materialCard(title string, accentIdx int, content fyne.CanvasObject) fyne.C
 		innerContent = container.NewPadded(content)
 	}
 
-	// ── 强调条 + 内容横向排列 ─────────────────────────────────────
+	// ── 强调条 + 内容区横向排列 ───────────────────────────────────────────────
 	cardBody := container.NewBorder(nil, nil, accentBar, nil, innerContent)
 
-	// ── 用 NewStack 叠放：bg 在底，cardBody 在上 ──────────────────
-	// NewStack 是 Fyne 内置布局，比自定义 layout 性能更好，resize 无卡顿
-	return container.NewPadded(
-		container.NewStack(bg, cardBody),
-	)
+	// ── Stack：shadowRect → bg → cardBody ────────────────────────────────────
+	// 用 CustomPaddedLayout 把 shadowRect 向右下偏移 2px 实现阴影感
+	card := container.NewStack(shadowRect, bg, cardBody)
+
+	// 外层 Padded：给卡片四周留 6px 呼吸空间（投影不被裁剪）
+	return container.NewPadded(card)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// buildLogPanel 日志面板：与 materialCard 同风格，但内容区填满所有剩余空间
+// ── buildLogPanel 日志面板（内容区填满剩余高度）──────────────────────────────
 //
-// materialCard 内部用 VBox 包内容，VBox 不会拉伸子元素到剩余高度，
-// 导致 LogScroll 只显示最小高度。这里改用 container.NewBorder：
-//   - 顶部：标题行（固定高度）
-//   - 中间：content（填充剩余全部高度）
-// ─────────────────────────────────────────────────────────────────────────────
+// 不用 materialCard 的 VBox 包装（VBox 不拉伸子元素），
+// 用 Border：标题行固定，content 填充剩余全部高度。
 func buildLogPanel(title string, accentIdx int, content fyne.CanvasObject) fyne.CanvasObject {
 	accent := mdAccentColors[accentIdx%len(mdAccentColors)]
 
-	// ── 卡片背景 ──────────────────────────────────────────────────
-	bg := canvas.NewRectangle(color.White)
+	// ── 投影 + 背景 ───────────────────────────────────────────────────────────
+	shadowRect := canvas.NewRectangle(color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x14})
+	shadowRect.CornerRadius = 10
+	bg := canvas.NewRectangle(mdSurface)
 	bg.CornerRadius = 8
-	bg.StrokeColor = color.NRGBA{R: 0xE0, G: 0xE0, B: 0xE0, A: 0xFF}
+	bg.StrokeColor = color.NRGBA{R: 0xE8, G: 0xE8, B: 0xE8, A: 0xFF}
 	bg.StrokeWidth = 1
 
-	// ── 左侧彩色强调条 ────────────────────────────────────────────
+	// ── 左侧强调条 ────────────────────────────────────────────────────────────
 	accentBar := canvas.NewRectangle(accent)
 	accentBar.CornerRadius = 4
 	accentBar.SetMinSize(fyne.NewSize(4, 0))
 
-	// ── 标题行 ────────────────────────────────────────────────────
+	// ── 标题行 ────────────────────────────────────────────────────────────────
 	dot := canvas.NewRectangle(accent)
-	dot.CornerRadius = 2
+	dot.CornerRadius = 3
 	dot.SetMinSize(fyne.NewSize(12, 12))
 
-	titleLabel := widget.NewLabelWithStyle(
-		title,
-		fyne.TextAlignLeading,
-		fyne.TextStyle{Bold: true},
-	)
-	titleRow := container.NewHBox(dot, titleLabel)
+	titleLabel := widget.NewRichTextFromMarkdown("**" + title + "**")
+	titleRow := container.NewBorder(nil, nil, container.NewPadded(dot), nil,
+		container.NewPadded(titleLabel))
 
 	divider := canvas.NewRectangle(color.NRGBA{R: 0xF0, G: 0xF0, B: 0xF0, A: 0xFF})
 	divider.SetMinSize(fyne.NewSize(0, 1))
 
 	header := container.NewVBox(titleRow, divider)
 
-	// ── 内容区：用 Border 让 content 填满剩余高度 ─────────────────
-	// top=header 固定，center=content 自动拉伸填充
+	// ── Border：header 固定顶部，content 填满剩余 ─────────────────────────────
 	inner := container.NewBorder(header, nil, nil, nil, container.NewPadded(content))
 
-	// ── 强调条 + 内容区横向排列 ───────────────────────────────────
+	// ── 强调条 + 内容横向 ─────────────────────────────────────────────────────
 	cardBody := container.NewBorder(nil, nil, accentBar, nil, inner)
 
-	// ── NewStack：bg 铺满底层，cardBody 叠上去 ────────────────────
-	return container.NewStack(bg, cardBody)
+	return container.NewStack(shadowRect, bg, cardBody)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// buildTitleBanner 构建顶部 Material 标题横幅（Amber 底色）
-// ─────────────────────────────────────────────────────────────────────────────
+// ── buildTitleBanner 顶部 Material 标题横幅 ──────────────────────────────────
+//
+// Amber 渐变底色 + 图标装饰 + 双行文字
 func buildTitleBanner() fyne.CanvasObject {
-	bg := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF})
+	// 主背景：Amber 700
+	bg := canvas.NewRectangle(mdPrimary)
 	bg.CornerRadius = 0
 
-	// 半透明圆形装饰
-	deco := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x33})
-	deco.CornerRadius = 50
-	deco.SetMinSize(fyne.NewSize(48, 48))
+	// 右下装饰圆（半透明，模拟波纹背景）
+	circle1 := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x1A})
+	circle1.CornerRadius = 60
+	circle1.SetMinSize(fyne.NewSize(100, 100))
 
-	title := widget.NewLabelWithStyle(
-		"GCC 课程选课助手  V3.0",
-		fyne.TextAlignCenter,
-		fyne.TextStyle{Bold: true},
-	)
-	title.Importance = widget.HighImportance
+	circle2 := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x0D})
+	circle2.CornerRadius = 40
+	circle2.SetMinSize(fyne.NewSize(60, 60))
 
-	subtitle := widget.NewLabelWithStyle(
-		"自动化选课工具  ·  仅供学习研究使用",
-		fyne.TextAlignCenter,
-		fyne.TextStyle{Italic: true},
-	)
+	// 顶部高光线（模拟玻璃材质上边缘）
+	topShim := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x66})
+	topShim.SetMinSize(fyne.NewSize(0, 2))
 
-	divider := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x4D})
-	divider.SetMinSize(fyne.NewSize(0, 1))
+	// 主标题
+	title := widget.NewRichTextFromMarkdown("**GCC 课程选课助手  V3.0**")
+	title.Alignment = fyne.TextAlignCenter
+
+	// 副标题
+	subtitle := canvas.NewText("自动化选课工具  ·  仅供学习研究使用", color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xCC})
+	subtitle.TextSize = 12
+	subtitle.Alignment = fyne.TextAlignCenter
+
+	// 底部分割线
+	bottomLine := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0x8F, B: 0x00, A: 0xFF})
+	bottomLine.SetMinSize(fyne.NewSize(0, 3))
 
 	textCol := container.NewVBox(
-		widget.NewLabel(""), // 上边距
-		title,
-		subtitle,
-		divider,
-		widget.NewLabel(""), // 下边距
+		topShim,
+		container.NewPadded(container.NewVBox(
+			container.NewPadded(title),
+			subtitle,
+		)),
+		bottomLine,
 	)
+
+	// 左侧图标装饰
+	iconDeco := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x33})
+	iconDeco.CornerRadius = 12
+	iconDeco.SetMinSize(fyne.NewSize(44, 44))
 
 	foreground := container.NewBorder(nil, nil,
-		container.NewPadded(deco), nil,
-		container.NewPadded(textCol),
+		container.NewPadded(iconDeco),
+		container.NewPadded(circle2),
+		textCol,
 	)
 
-	// NewStack：bg 铺满底层，foreground 叠加，无需自定义 layout
-	return container.NewStack(bg, foreground)
+	return container.NewStack(bg, circle1, foreground)
 }
 
-// bannerLayout 已废弃，由 container.NewStack 替代，保留空结构防止旧引用报错
-type bannerLayout struct{ bg *canvas.Rectangle }
+// ── 字段行辅助函数 ────────────────────────────────────────────────────────────
 
-func (b *bannerLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	b.bg.Resize(size)
-	b.bg.Move(fyne.NewPos(0, 0))
-	for _, o := range objects {
-		o.Resize(size)
-		o.Move(fyne.NewPos(0, 0))
-	}
+// mdFieldRow 标签 + 输入控件一行排列
+// 标签区宽度固定 80px，输入控件填充剩余宽度
+func mdFieldRow(label string, input fyne.CanvasObject) fyne.CanvasObject {
+	// 小圆点装饰
+	dot := canvas.NewRectangle(mdPrimary)
+	dot.CornerRadius = 3
+	dot.SetMinSize(fyne.NewSize(5, 5))
+
+	lbl := container.NewHBox(dot, widget.NewLabel(label))
+	return container.NewBorder(nil, nil, container.NewPadded(lbl), nil, input)
 }
 
-func (b *bannerLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
-	min := fyne.NewSize(0, 80)
-	for _, o := range objects {
-		s := o.MinSize()
-		if s.Width > min.Width {
-			min.Width = s.Width
-		}
-		if s.Height > min.Height {
-			min.Height = s.Height
-		}
-	}
-	return min
+// mdSectionDivider 字段间轻量分隔线（带上下 4px 间距）
+func mdSectionDivider() fyne.CanvasObject {
+	line := canvas.NewRectangle(color.NRGBA{R: 0xEE, G: 0xEE, B: 0xEE, A: 0xFF})
+	line.SetMinSize(fyne.NewSize(0, 1))
+	return container.NewPadded(line)
 }
 
-// mdIconLabel 带图标的字段标签（Material style）
+// mdIconLabel 带图标或圆点装饰的字段标签
 func mdIconLabel(icon fyne.Resource, text string) fyne.CanvasObject {
 	dot := canvas.NewRectangle(mdPrimary)
 	dot.CornerRadius = 3
@@ -219,117 +234,40 @@ func mdIconLabel(icon fyne.Resource, text string) fyne.CanvasObject {
 	return lbl
 }
 
-// mdFieldRow 标签 + 输入控件一行排列
-func mdFieldRow(label string, input fyne.CanvasObject) fyne.CanvasObject {
-	lbl := mdIconLabel(nil, label)
-	return container.NewBorder(nil, nil, lbl, nil, input)
-}
-
-// mdSectionDivider 轻量分隔线
-func mdSectionDivider() fyne.CanvasObject {
-	line := canvas.NewRectangle(color.NRGBA{R: 0xEE, G: 0xEE, B: 0xEE, A: 0xFF})
-	line.SetMinSize(fyne.NewSize(0, 1))
-	return container.NewPadded(line)
-}
-
-// mdChip 标签芯片（用于强调小标题）
-// 使用 NewStack 替代 chipLayout，padding 由 container.NewPadded 处理
+// mdChip 液态玻璃风格标签芯片（用于小标题强调）
 func mdChip(text string, accent color.NRGBA) fyne.CanvasObject {
-	bg := canvas.NewRectangle(color.NRGBA{R: accent.R, G: accent.G, B: accent.B, A: 0x1A})
+	bg := canvas.NewRectangle(color.NRGBA{R: accent.R, G: accent.G, B: accent.B, A: 0x20})
 	bg.CornerRadius = 12
 	lbl := widget.NewLabel(text)
-	// NewStack 内容即为 lbl 大小，bg 铺满；外层 padding 留出芯片间距
 	return container.NewPadded(container.NewStack(bg, lbl))
 }
 
-type chipLayout struct{ bg *canvas.Rectangle }
-
-func (c *chipLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	c.bg.Resize(size)
-	c.bg.Move(fyne.NewPos(0, 0))
-	for _, o := range objects {
-		o.Resize(size)
-		o.Move(fyne.NewPos(0, 0))
-	}
-}
-
-func (c *chipLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
-	min := fyne.NewSize(0, 0)
-	for _, o := range objects {
-		s := o.MinSize()
-		if s.Width+16 > min.Width {
-			min.Width = s.Width + 16
-		}
-		if s.Height+8 > min.Height {
-			min.Height = s.Height + 8
-		}
-	}
-	return min
-}
-
 // mdInputWithIcon 带前缀图标的输入框包装
-// widget.Icon 不支持 SetMinSize，用固定尺寸容器包裹
 func mdInputWithIcon(icon fyne.Resource, entry fyne.CanvasObject) fyne.CanvasObject {
 	if icon == nil {
 		return entry
 	}
 	ic := widget.NewIcon(icon)
-	// 用固定最小尺寸的矩形作为占位，让图标容器有固定宽度
-	iconBox := container.New(&fixedSizeLayout{w: 20, h: 20}, ic)
+	iconBox := container.New(&fixedSizeLayout{w: 22, h: 22}, ic)
 	return container.NewBorder(nil, nil, iconBox, nil, entry)
 }
 
-// ─── 底部按钮栏 Material FAB 风格 ────────────────────────────────────────────
-
-// mdButtonBar 构建带 Material 样式的底部操作栏
-// 使用 NewStack 替代 barLayout，减少 resize 计算压力
+// ── mdButtonBar Material FAB 风格操作栏（备用，主按钮栏使用 liquidButtonBar）──
 func mdButtonBar(startBtn, stopBtn, copyBtn fyne.CanvasObject, statusText string) fyne.CanvasObject {
-	barBg := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF})
-
-	topLine := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF})
+	barBg := canvas.NewRectangle(mdSurface)
+	topLine := canvas.NewRectangle(mdPrimary)
 	topLine.SetMinSize(fyne.NewSize(0, 3))
-
-	// 芯片状态指示
 	statusChip := mdChip("● "+statusText, color.NRGBA{R: 0x43, G: 0xA0, B: 0x47, A: 0xFF})
-
-	buttons := container.NewHBox(startBtn, stopBtn,
-		canvas.NewRectangle(color.NRGBA{R: 0xE0, G: 0xE0, B: 0xE0, A: 0xFF}),
-		copyBtn,
-	)
-
+	sep := canvas.NewRectangle(color.NRGBA{R: 0xE0, G: 0xE0, B: 0xE0, A: 0xFF})
+	sep.SetMinSize(fyne.NewSize(1, 24))
+	buttons := container.NewHBox(startBtn, stopBtn, sep, copyBtn)
 	row := container.NewBorder(nil, nil, nil, statusChip, buttons)
 	foreground := container.NewVBox(topLine, container.NewPadded(row))
-
-	// NewStack：barBg 铺满底层，foreground 内容叠上去
 	return container.NewStack(barBg, foreground)
 }
 
-type barLayout struct{ bg *canvas.Rectangle }
-
-func (b *barLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	b.bg.Resize(size)
-	b.bg.Move(fyne.NewPos(0, 0))
-	for _, o := range objects {
-		o.Resize(size)
-		o.Move(fyne.NewPos(0, 0))
-	}
-}
-
-func (b *barLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
-	min := fyne.NewSize(0, 0)
-	for _, o := range objects {
-		s := o.MinSize()
-		if s.Width > min.Width {
-			min.Width = s.Width
-		}
-		if s.Height > min.Height {
-			min.Height = s.Height
-		}
-	}
-	return min
-}
-
-// fixedSizeLayout 固定最小尺寸布局，用于给不支持 SetMinSize 的 widget 设定大小
+// ── fixedSizeLayout 固定最小尺寸布局 ─────────────────────────────────────────
+// 用于给不支持 SetMinSize 的 widget 设定固定尺寸（如 widget.Icon）
 type fixedSizeLayout struct{ w, h float32 }
 
 func (f *fixedSizeLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -343,5 +281,5 @@ func (f *fixedSizeLayout) MinSize(_ []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(f.w, f.h)
 }
 
-// keep theme reference used in other files
+// keep theme reference to avoid import cycle warnings
 var _ = theme.DefaultTheme()
