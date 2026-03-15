@@ -445,29 +445,32 @@ func encryptWithRSA(pubKeyStr, password string) (string, error) {
 
 // checkLoginStatus 访问选课首页，验证 Session 是否有效
 //
-// 判断逻辑说明（修复误判问题）：
+// 判断逻辑说明：
 //
-//	原版用 strings.Contains(body, "登录") 判断失败，但选课首页顶部导航栏通常包含
-//	"退出登录"链接，导致即使登录成功也会被判定为失败。
+//	验证路径选择 /xtgl/index_index.html（系统主页），而不是选课页面，原因：
+//	  1. 选课页面（/jwglxt/xsxk/...）路径因学校正方部署版本不同可能不存在（404）
+//	  2. 系统主页在所有正方 V9 部署中均固定存在
+//	  3. 未登录时访问主页会被 302 重定向回登录页，doGet 跟随重定向后得到登录页 HTML
 //
-//	正确做法：
-//	  1. 如果响应中出现 "login_slogin"（登录页 URL 路径），说明被重定向到登录页 → 失败
-//	  2. 如果响应中同时出现密码输入框（type="password"），说明显示的是登录表单 → 失败
-//	  3. 以上两条都不满足 → 视为登录成功（选课首页正常加载）
+//	判断规则：
+//	  1. 如果响应中出现 "login_slogin"（登录页路径特征）→ 被重定向到登录页 → 失败
+//	  2. 如果响应中出现密码输入框（type="password"）→ 显示的是登录表单 → 失败
+//	  3. 以上两条都不满足 → Session 有效，登录成功
+const pathLoginCheck = "/xtgl/index_index.html"
+
 func (c *Client) checkLoginStatus() error {
-	testURL := c.buildURL(pathSelectIndex) + "?gnmkdm=" + gnmkdmSelect + "&layout=default"
+	testURL := c.buildURL(pathLoginCheck)
 	body, err := c.doGet(testURL)
 	if err != nil {
 		return fmt.Errorf("登录状态验证失败: %w", err)
 	}
 
-	// 判断1：响应 URL 或页面中出现登录页路径标志
+	// 判断1：被重定向回登录页（响应 HTML 中出现登录页路径特征）
 	if strings.Contains(body, "login_slogin") {
 		return fmt.Errorf("登录失败：被重定向到登录页，请检查账号或密码")
 	}
 
-	// 判断2：页面中出现密码输入框（登录表单的唯一标志，选课页不会有此元素）
-	// 使用 type="password" 而非 "密码" 关键词，避免导航栏"退出登录"文字触发误判
+	// 判断2：响应包含密码输入框（登录表单特有元素，主页/选课页不会有）
 	if strings.Contains(body, `type="password"`) || strings.Contains(body, `type='password'`) {
 		return fmt.Errorf("登录失败：页面返回了登录表单，请检查账号或密码")
 	}
