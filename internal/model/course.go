@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -96,8 +97,59 @@ func (c *Course) String() string {
 	return c.Name + " " + c.Teacher + " " + c.WeekTime
 }
 
+// extractHTMLText 从 HTML 中提取可读的纯文本（去除标签、压缩空白）
+// 用于在服务端返回 HTML 错误页时给出人类可读的错误提示
+func extractHTMLText(html string) string {
+	// 去掉 <script>...</script> 和 <style>...</style> 块
+	for _, tag := range []string{"script", "style"} {
+		for {
+			open := strings.Index(strings.ToLower(html), "<"+tag)
+			if open < 0 {
+				break
+			}
+			close := strings.Index(strings.ToLower(html[open:]), "</"+tag+">")
+			if close < 0 {
+				break
+			}
+			html = html[:open] + " " + html[open+close+len("</"+tag+">"):]
+		}
+	}
+	// 去掉所有 HTML 标签
+	inTag := false
+	var buf strings.Builder
+	for _, r := range html {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+			buf.WriteByte(' ')
+		case !inTag:
+			buf.WriteRune(r)
+		}
+	}
+	// 压缩连续空白，截取前 120 字符
+	text := strings.Join(strings.Fields(buf.String()), " ")
+	if len([]rune(text)) > 120 {
+		runes := []rune(text)
+		text = string(runes[:120]) + "..."
+	}
+	return text
+}
+
 // ParseCourseList 解析课程列表JSON
 func ParseCourseList(data []byte) (*CourseList, error) {
+	// 服务端在选课未开放、会话失效等情况下会返回 HTML 而非 JSON
+	// 提前检测，给出可读错误，避免 JSON 解析器报 "invalid character '<'"
+	trimmed := strings.TrimSpace(string(data))
+	if strings.HasPrefix(trimmed, "<") {
+		hint := extractHTMLText(trimmed)
+		if hint == "" {
+			hint = "（无法提取页面文字）"
+		}
+		return nil, fmt.Errorf("服务端返回了HTML而非课程数据（可能选课未开放或会话已过期）: %s", hint)
+	}
+
 	var result struct {
 		TmpList []map[string]interface{} `json:"tmpList"`
 		Sfxsjc  string                   `json:"sfxsjc"`
