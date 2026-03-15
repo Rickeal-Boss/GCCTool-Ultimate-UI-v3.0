@@ -9,49 +9,54 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.os }} - ${{ matrix.arch }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          # Windows
-          - os: windows-latest
+          # Windows amd64
+          - runner: windows-latest
+            os: windows
             arch: amd64
             goos: windows
             goarch: amd64
             output: gcc_helper.exe
             output_debug: gcc_helper_debug.exe
             ldflags: "-s -w -H windowsgui"
-            cgo: 1
-          
-          # macOS Intel (amd64) — 必须用 Intel runner 本机编译，Fyne CGO 不支持交叉编译
-          - os: macos-13
+            cgo: "1"
+
+          # macOS Intel (amd64) — macos-13 是 Intel runner
+          - runner: macos-13
+            os: macos
             arch: amd64
             goos: darwin
             goarch: amd64
             output: gcc_helper
             output_debug: gcc_helper_debug
             ldflags: "-s -w"
-            cgo: 1
-          
-          # macOS Apple Silicon (arm64) — 用 arm64 runner 本机编译
-          - os: macos-latest
+            cgo: "1"
+
+          # macOS Apple Silicon (arm64) — macos-latest / macos-14 是 M1 runner
+          - runner: macos-latest
+            os: macos
             arch: arm64
             goos: darwin
             goarch: arm64
             output: gcc_helper_arm64
             output_debug: gcc_helper_debug_arm64
             ldflags: "-s -w"
-            cgo: 1
-          
-          # Linux
-          - os: ubuntu-latest
+            cgo: "1"
+
+          # Linux amd64 — Fyne 在 Linux CI 上用 CGO=0 headless 构建
+          - runner: ubuntu-latest
+            os: linux
             arch: amd64
             goos: linux
             goarch: amd64
             output: gcc_helper_linux
             output_debug: gcc_helper_debug_linux
             ldflags: "-s -w"
-            cgo: 0
+            cgo: "0"
 
     steps:
       - name: Checkout code
@@ -74,15 +79,27 @@ jobs:
             ${{ runner.os }}-go-${{ matrix.goarch }}-
 
       - name: Download dependencies
-        run: |
-          go mod tidy
-          go mod download
+        run: go mod download
 
-      - name: Install macOS system dependencies (Fyne CGO build)
+      # ------------------------------------------------------------------ macOS
+      # Fyne CGO 在 macOS 上需要：
+      #   1. Xcode Command Line Tools（runner 已预装）
+      #   2. pkg-config（用于查找系统库）
+      #   3. glfw（OpenGL 窗口库，Fyne 通过 CGO 链接）
+      # 两个 macOS runner（amd64/arm64）共用同一步骤
+      # ------------------------------------------------------------------ macOS
+      - name: Install macOS build dependencies (Fyne CGO)
         if: matrix.goos == 'darwin'
         run: |
-          # Fyne 需要这些系统依赖才能通过 CGO 编译
-          brew install pkg-config
+          brew update --preinstall || true
+          brew install pkg-config glfw
+          # 确认 Xcode CLT 可用
+          xcode-select --print-path || xcode-select --install || true
+
+      # ------------------------------------------------------------------ Linux
+      # Linux 使用 CGO_ENABLED=0，无需 GL 依赖
+      # 但若将来需要 CGO，需要安装 libgl-dev / libxcursor-dev 等
+      # ------------------------------------------------------------------ Linux
 
       - name: Build release binary
         env:
@@ -101,26 +118,27 @@ jobs:
       - name: Create release archive
         shell: bash
         run: |
-          mkdir -p release
-          cp ${{ matrix.output }} release/
-          cp ${{ matrix.output_debug }} release/
-          cp data.json release/
-          cp README.md release/
-          
-          # Create platform-specific archive
+          ARCHIVE_DIR="$(pwd)/release"
+          mkdir -p "$ARCHIVE_DIR"
+          cp "${{ matrix.output }}"       "$ARCHIVE_DIR/"
+          cp "${{ matrix.output_debug }}" "$ARCHIVE_DIR/"
+          cp data.json "$ARCHIVE_DIR/"
+          cp README.md "$ARCHIVE_DIR/" || true
+
+          ARCHIVE_NAME="gcc_helper_${{ matrix.goos }}_${{ matrix.arch }}"
+
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            cd release && zip -r ../gcc_helper_${{ matrix.goos }}_${{ matrix.goarch }}.zip *
+            cd "$ARCHIVE_DIR" && zip -r "$(pwd)/../${ARCHIVE_NAME}.zip" . && cd ..
           else
-            tar -czf ../gcc_helper_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz -C release .
+            tar -czf "${ARCHIVE_NAME}.tar.gz" -C "$ARCHIVE_DIR" .
           fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gcc-helper-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: gcc-helper-${{ matrix.goos }}-${{ matrix.arch }}
           path: |
-            gcc_helper_${{ matrix.goos }}_${{ matrix.goarch }}.*
-            release/
+            gcc_helper_${{ matrix.goos }}_${{ matrix.arch }}.*
           retention-days: 90
 
   release:
@@ -137,52 +155,54 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
+      - name: Display downloaded artifacts
+        run: ls -lR artifacts/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            artifacts/**/*
+          files: artifacts/**
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
             ## GCC选课助手 V3.0
-            
+
             ### 📦 下载
-            
+
             选择适合你操作系统的版本：
-            
+
             - **Windows**: `gcc_helper_windows_amd64.zip`
             - **macOS (Intel)**: `gcc_helper_darwin_amd64.tar.gz`
-            - **macOS (Apple Silicon)**: `gcc_helper_darwin_arm64.tar.gz`
+            - **macOS (Apple Silicon / M系列)**: `gcc_helper_darwin_arm64.tar.gz`
             - **Linux**: `gcc_helper_linux_amd64.tar.gz`
-            
+
             ### 📋 使用说明
-            
+
             1. 下载并解压对应平台的压缩包
             2. 运行程序：
                - Windows: 双击 `gcc_helper.exe`
                - macOS/Linux: 在终端运行 `./gcc_helper`
             3. 详细使用说明请查看 `README.md` 和 `QUICKSTART.md`
-            
+
             ### 🐛 Debug版本
-            
-            每个平台都提供了debug版本（带控制台输出），用于故障排查：
+
+            每个平台都提供了 debug 版本（带控制台输出），用于故障排查：
             - Windows: `gcc_helper_debug.exe`
-            - macOS/Linux: `gcc_helper_debug`
-            
+            - macOS (Intel): `gcc_helper_debug`
+            - macOS (ARM): `gcc_helper_debug_arm64`
+            - Linux: `gcc_helper_debug_linux`
+
             ### ⚠️ 注意事项
-            
-            - Windows版本需要VC++ Runtime支持
-            - 首次运行时可能需要信任程序（被杀毒软件拦截）
-            - 遇到问题请查看README.md的故障排除部分
-            
+
+            - Windows 版本需要 VC++ Runtime 支持
+            - macOS 首次运行需在「系统设置 → 隐私与安全性」允许运行
+            - 遇到问题请查看 README.md 的故障排除部分
+
             ### 📝 更新日志
-            
+
             查看 CHANGELOG_V3.md 了解详细更新内容
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

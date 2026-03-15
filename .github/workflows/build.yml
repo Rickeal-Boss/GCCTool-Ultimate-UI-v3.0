@@ -35,9 +35,7 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Download dependencies
-        run: |
-          go mod tidy
-          go mod download
+        run: go mod download
 
       - name: Build Windows EXE
         env:
