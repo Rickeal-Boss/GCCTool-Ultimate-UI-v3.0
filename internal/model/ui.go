@@ -108,7 +108,21 @@ func (ui *UIComponents) GetConfig() *Config {
 		cfg.Threads = parseInt(t)
 	}
 
-	cfg.CourseType = ui.CourseTypeRadio.Selected
+	// Radio 显示的是中文，后端（course.Match / getCourseTypeCode）使用英文 key：
+	//   "普通网课" → "online"（kklxdm = "10"）
+	//   "体育课"   → "pe"    （kklxdm = "20"）
+	//   "普通课"   → "normal"（kklxdm = "30"）
+	courseTypeMap := map[string]string{
+		"普通网课": "online",
+		"体育课":  "pe",
+		"普通课":  "normal",
+	}
+	if t, ok := courseTypeMap[ui.CourseTypeRadio.Selected]; ok {
+		cfg.CourseType = t
+	} else {
+		cfg.CourseType = "online" // 默认网课
+	}
+
 	cfg.CourseName = ui.CourseNameEntry.Text
 	cfg.TeacherName = ui.TeacherEntry.Text
 	cfg.CourseNumber = ui.CourseNumEntry.Text
@@ -116,9 +130,9 @@ func (ui *UIComponents) GetConfig() *Config {
 		cfg.MinCredit = parseInt(c)
 	}
 
-	// 解析课程分类
+	// 解析课程分类（CategoryChecks 可能在 initComponents 前为 nil，需要保护）
 	for i, check := range ui.CategoryChecks {
-		if check.Checked {
+		if check != nil && check.Checked {
 			cfg.Categories[getCategoryLabel(i)] = true
 		}
 	}
@@ -127,9 +141,13 @@ func (ui *UIComponents) GetConfig() *Config {
 }
 
 // SetConfig 设置UI配置
+//
+// 安全说明：密码字段不从 cfg 还原到 UI，
+// 用户每次使用必须手动输入密码，防止明文密码被序列化保存后再读回。
 func (ui *UIComponents) SetConfig(cfg *Config) {
 	ui.UsernameEntry.SetText(cfg.Username)
-	ui.PasswordEntry.SetText(cfg.Password)
+	// ⚠️ 密码字段故意不还原：cfg.Password 永远不应从持久化存储中读取并回填到 UI
+	// ui.PasswordEntry.SetText(cfg.Password) // 禁止
 	ui.NodeSelect.SetSelected(cfg.NodeURL)
 	ui.AgentEntry.SetText(cfg.Agent)
 	ui.HourEntry.SetText(toString(cfg.Hour))

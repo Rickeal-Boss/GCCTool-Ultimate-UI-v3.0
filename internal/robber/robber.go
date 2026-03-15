@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/client"
@@ -32,16 +33,21 @@ type Robber struct {
 	logger *logger.Logger
 	config *model.Config
 
-	running bool
+	running int32 // atomic: 0=stopped, 1=running
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+
+	// extraCache 缓存 courseID → CourseExtra，避免每轮都重新请求 GetClassInfo
+	extraCache map[string]*model.CourseExtra
+	extraMu    sync.RWMutex
 }
 
 // NewRobber 创建抢课调度器
 func NewRobber(clt *client.Client, log *logger.Logger) *Robber {
 	return &Robber{
-		client: clt,
-		logger: log,
+		client:     clt,
+		logger:     log,
+		extraCache: make(map[string]*model.CourseExtra),
 	}
 }
 
@@ -54,12 +60,11 @@ func NewRobber(clt *client.Client, log *logger.Logger) *Robber {
 //  1. 同步登录（有错误立即返回，让 UI 显示错误信息）
 //  2. 启动独立 goroutine 等待开始时间，时间到后启动 Worker
 func (r *Robber) Start(cfg *model.Config) error {
-	if r.running {
+	if !atomic.CompareAndSwapInt32(&r.running, 0, 1) {
 		return fmt.Errorf("抢课已经在运行中")
 	}
 
 	r.config = cfg
-	r.running = true
 
 	if r.cancel != nil {
 		r.cancel()
@@ -71,7 +76,7 @@ func (r *Robber) Start(cfg *model.Config) error {
 	// 步骤1：同步登录（每次 Start 都新建了 Client，Cookie Jar 为空，必须重新登录）
 	r.logger.Info("正在登录教务系统...")
 	if err := r.client.Login(cfg); err != nil {
-		r.running = false
+		atomic.StoreInt32(&r.running, 0)
 		cancel()
 		return fmt.Errorf("登录失败: %w", err)
 	}
@@ -105,12 +110,11 @@ func (r *Robber) Start(cfg *model.Config) error {
 // Worker 会在下一轮循环检测到 ctx.Done() 后自行退出，
 // 避免在 UI 线程中调用 wg.Wait() 导致界面冻结。
 func (r *Robber) Stop() {
-	if !r.running {
+	if !atomic.CompareAndSwapInt32(&r.running, 1, 0) {
 		return
 	}
 
 	r.logger.Info("正在停止抢课...")
-	r.running = false
 
 	if r.cancel != nil {
 		r.cancel()
@@ -230,7 +234,8 @@ func (r *Robber) worker(ctx context.Context, id int) {
 //
 // 请求次数优化：
 //   - 每轮只调用 GetClassList（1次）+ SelectCourse（1次/课程）
-//   - GetClassInfo 仅在第一次遇到某门课时调用，do_jxb_id 缓存在 course.Extra 里
+//   - GetClassInfo 仅在第一次遇到某门课时调用，do_jxb_id 缓存在 r.extraCache 里
+//     （不能缓存在 course.Extra，因为 GetClassList 每轮返回全新的 *Course 对象）
 //   - SelectCourse 不再重复 GET 首页 + POST display（已移至 client 层缓存）
 func (r *Robber) robCourse(workerID int) error {
 	// 获取课程列表（含剩余名额信息）
@@ -250,15 +255,23 @@ func (r *Robber) robCourse(workerID int) error {
 			continue
 		}
 
-		// do_jxb_id 只在 Extra 为空时拉取一次，后续循环直接复用缓存值
-		if course.Extra == nil {
-			extra, err := r.client.GetClassInfo(course.ID)
-			if err != nil {
-				r.logger.Warn(fmt.Sprintf("获取课程详情失败: %s - %v", course.Name, err))
+		// do_jxb_id 优先从 Robber 级别的缓存中取，避免每轮重建 Course 对象后缓存失效
+		r.extraMu.RLock()
+		extra, cached := r.extraCache[course.ID]
+		r.extraMu.RUnlock()
+
+		if !cached {
+			var fetchErr error
+			extra, fetchErr = r.client.GetClassInfo(course.ID)
+			if fetchErr != nil {
+				r.logger.Warn(fmt.Sprintf("获取课程详情失败: %s - %v", course.Name, fetchErr))
 				continue
 			}
-			course.Extra = extra
+			r.extraMu.Lock()
+			r.extraCache[course.ID] = extra
+			r.extraMu.Unlock()
 		}
+		course.Extra = extra
 
 		r.logger.Info(fmt.Sprintf("Worker %d 尝试选课: %s (%s)", workerID, course.Name, course.Teacher))
 		if err := r.client.SelectCourse(course); err != nil {
@@ -297,5 +310,5 @@ func isRateLimited(msg string) bool {
 
 // IsRunning 返回当前是否正在运行
 func (r *Robber) IsRunning() bool {
-	return r.running
+	return atomic.LoadInt32(&r.running) == 1
 }

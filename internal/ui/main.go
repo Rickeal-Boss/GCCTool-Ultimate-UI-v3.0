@@ -352,16 +352,8 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 	a.logger.Info("开始抢课任务...")
 
 	go func() {
+		// panic 恢复放在最外层（defer LIFO，最后注册的最先执行）
 		defer func() {
-			// 密码原地清零（防止堆栈/内存残留）
-			if len(cfg.Password) > 0 {
-				b := []byte(cfg.Password)
-				for i := range b {
-					b[i] = 0
-				}
-				cfg.Password = ""
-			}
-
 			if r := recover(); r != nil {
 				a.logger.Error(fmt.Sprintf("抢课任务异常: %v", r))
 				a.resetUIAfterStop()
@@ -373,10 +365,16 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 		a.robber = robber.NewRobber(a.client, a.logger)
 
 		if err := a.robber.Start(cfg); err != nil {
+			// 登录失败：立即清零密码，UI 恢复
+			zeroPassword(cfg)
 			a.logger.Error(fmt.Sprintf("启动失败: %v", err))
 			a.resetUIAfterStop()
 			return
 		}
+
+		// 登录成功：密码已完成 RSA 加密并提交，原文不再需要，立即清零
+		// 必须在 Start() 返回后同步执行，不能放 defer（defer 要等整个 goroutine 退出才执行）
+		zeroPassword(cfg)
 
 		// Start() 登录成功后立即返回，更新状态为"抢课中"
 		a.setStatus("● 抢课中", color.NRGBA{R: 0x43, G: 0xA0, B: 0x47, A: 0xFF})
@@ -385,7 +383,9 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 
 func (a *App) onStopClicked() {
 	a.logger.Info("正在停止抢课...")
-	a.robber.Stop()
+	if a.robber != nil {
+		a.robber.Stop()
+	}
 	a.resetUIAfterStop()
 }
 
@@ -408,8 +408,15 @@ func (a *App) setStatus(text string, col color.NRGBA) {
 }
 
 // Run 启动应用主循环
+//
+// ShowAndRun 是阻塞调用，窗口关闭后返回。
+// 返回后立即关闭 Logger，停止后台 processLogs goroutine，防止 goroutine 泄漏。
 func (a *App) Run() {
 	a.window.ShowAndRun()
+	// 程序退出：关闭 logger（停止 processLogs goroutine）
+	if a.logger != nil {
+		a.logger.Close()
+	}
 }
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -453,11 +460,28 @@ func disableInputs(ui *model.UIComponents, disabled bool) {
 	}
 
 	for _, check := range ui.CategoryChecks {
+		if check == nil {
+			continue
+		}
 		if disabled {
 			check.Disable()
 		} else {
 			check.Enable()
 		}
+	}
+}
+
+// zeroPassword 将 Config 中的密码字段原地清零，防止明文密码在内存中残留。
+//
+// Go 字符串是不可变的，这里先转为 []byte 逐字节清零，再赋空字符串，
+// 确保堆上的字节数组被清零（GC 回收前不会被读取）。
+func zeroPassword(cfg *model.Config) {
+	if len(cfg.Password) > 0 {
+		b := []byte(cfg.Password)
+		for i := range b {
+			b[i] = 0
+		}
+		cfg.Password = ""
 	}
 }
 

@@ -108,9 +108,12 @@ func getCourseTypeCode(courseType string) string {
 }
 
 // GetClassInfo 获取课程详情（上课时间、do_jxb_id 加密 ID 等）
+//
+// 正方 V9 该接口有时返回单对象 {...}，有时返回数组 [{...}]，
+// 此处先尝试数组，再 fallback 到单对象，保证两种格式均可正确解析。
 func (c *Client) GetClassInfo(courseID string) (*model.CourseExtra, error) {
 	params := map[string]string{
-		"kch_id":  courseID,
+		"kch_id": courseID,
 		"gnmkdm": gnmkdmSelect,
 	}
 
@@ -120,8 +123,8 @@ func (c *Client) GetClassInfo(courseID string) (*model.CourseExtra, error) {
 		return nil, err
 	}
 
-	// 解析响应（正方 V9 的课程详情包含 do_jxb_id 加密长 ID）
-	var result struct {
+	// 统一数据结构（方便两种格式共用解析逻辑）
+	type courseDetail struct {
 		Kcmc    string `json:"kcmc"`      // 课程名称
 		Jsm     string `json:"jsm"`       // 老师姓名
 		Jsmc    string `json:"jsmc"`      // 教室名称
@@ -130,14 +133,22 @@ func (c *Client) GetClassInfo(courseID string) (*model.CourseExtra, error) {
 		DoJxbID string `json:"do_jxb_id"` // 正方 V9：加密长 ID，选课必须用此值
 	}
 
-	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+	raw := []byte(resp)
+	var detail courseDetail
+
+	// 先尝试数组格式 [{...}]
+	var arr []courseDetail
+	if json.Unmarshal(raw, &arr) == nil && len(arr) > 0 {
+		detail = arr[0]
+	} else if err := json.Unmarshal(raw, &detail); err != nil {
+		// 两种格式均解析失败
 		return nil, fmt.Errorf("解析课程详情失败: %w", err)
 	}
 
 	return &model.CourseExtra{
-		ClassInfo: result.Jsmc,
-		ExamInfo:  result.Sksj,
-		Remark:    result.Kcbj,
-		DoJxbID:   result.DoJxbID,
+		ClassInfo: detail.Jsmc,
+		ExamInfo:  detail.Sksj,
+		Remark:    detail.Kcbj,
+		DoJxbID:   detail.DoJxbID,
 	}, nil
 }

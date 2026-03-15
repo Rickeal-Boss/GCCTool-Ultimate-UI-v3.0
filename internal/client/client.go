@@ -5,9 +5,11 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -77,10 +79,25 @@ type Client struct {
 func NewClient(nodeURL string) *Client {
 	jar, _ := cookiejar.New(nil)
 
+	transport := &http.Transport{
+		// 响应头超时：防止服务端 hang 住连接不发响应头，导致 Worker 永久挂起
+		ResponseHeaderTimeout: 20 * time.Second,
+		// TLS 握手超时
+		TLSHandshakeTimeout: 10 * time.Second,
+		// 连接超时
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		// 禁止跳过 TLS 验证（明确设置，防止将来被意外修改）
+		// TLSClientConfig: nil → 使用系统根证书，已验证，无需修改
+	}
+
 	return &Client{
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-			Jar:     jar,
+			Timeout:   30 * time.Second,
+			Jar:       jar,
+			Transport: transport,
 		},
 		baseURL:   getNodeURL(nodeURL),
 		cookieJar: jar,
@@ -94,10 +111,20 @@ func NewClient(nodeURL string) *Client {
 func NewClientWithProxy(nodeURL, agentURL string) *Client {
 	jar, _ := cookiejar.New(nil)
 
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		ResponseHeaderTimeout: 20 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
 	if agentURL != "" {
 		if proxyURL, err := url.Parse(agentURL); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
+		} else {
+			// 代理地址解析失败：打印警告，程序继续直连运行（不 panic）
+			fmt.Fprintf(os.Stderr, "[WARN] 代理地址解析失败，将使用直连: %v\n", err)
 		}
 	}
 

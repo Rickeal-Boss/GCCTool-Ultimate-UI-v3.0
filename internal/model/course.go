@@ -88,7 +88,13 @@ func (c *Course) Match(cfg *Config) bool {
 }
 
 // IsFull 检查是否满员
+//
+// Capacity == 0 表示服务端未返回总人数字段（zrs），
+// 此时乐观认为未满，避免课程被错误跳过。
 func (c *Course) IsFull() bool {
+	if c.Capacity <= 0 {
+		return false
+	}
 	return c.Selected >= c.Capacity
 }
 
@@ -190,6 +196,9 @@ func ParseCourseList(data []byte) (*CourseList, error) {
 		}
 		if v, ok := item["yxzrs"].(float64); ok {
 			course.Selected = int(v)
+		}
+		if v, ok := item["zrs"].(float64); ok {
+			course.Capacity = int(v)
 		}
 		if v, ok := item["kcrow"].(float64); ok {
 			course.RowNum = int(v)
