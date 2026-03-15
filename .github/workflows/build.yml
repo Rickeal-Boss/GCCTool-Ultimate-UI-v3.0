@@ -34,8 +34,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      - name: Download dependencies
-        run: go mod download
+      - name: Tidy and download dependencies
+        run: |
+          go mod tidy
+          go mod download
+          go mod verify
 
       - name: Build Windows EXE
         env:

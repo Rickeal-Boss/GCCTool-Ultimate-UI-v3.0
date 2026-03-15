@@ -78,8 +78,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.goarch }}-
 
-      - name: Download dependencies
-        run: go mod download
+      - name: Tidy and download dependencies
+        run: |
+          go mod tidy
+          go mod download
+          go mod verify
 
       # ------------------------------------------------------------------ macOS
       # Fyne CGO 在 macOS 上需要：
