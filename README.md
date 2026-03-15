@@ -57,14 +57,12 @@ GCCTool/
 
 无需自己构建，直接下载已构建好的程序：
 
-1. 访问仓库的 [Actions](https://github.com/your-repo/GCCTool/actions) 页面
-2. 找到最近的 "Build Windows EXE" 运行
-3. 点击 "Artifacts" 下载 `gcc-helper-windows-exe`
+1. 访问仓库的release页面
+2. 找到属于自己的版本
+3. 点击下载rar/zip
 4. 解压后运行 `gcc_helper.exe`
 
-或访问 [Releases](https://github.com/your-repo/GCCTool/releases) 页面下载正式版本。
-
-详细说明请查看 [GITHUB_ACTIONS_GUIDE.md](GITHUB_ACTIONS_GUIDE.md)。
+页面下载正式版本。
 
 ### 方式2: 本地构建
 
@@ -72,8 +70,7 @@ GCCTool/
 
 ```powershell
 # 1. 克隆项目
-git clone https://github.com/your-repo/GCCTool.git
-cd GCCTool
+git clone
 
 # 2. 安装依赖
 go mod download
@@ -82,15 +79,14 @@ go mod download
 .\build.ps1
 
 # 4. 运行
-.\gcc_helper_v3.0.0.exe
+
 ```
 
 #### Linux/Mac
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/your-repo/GCCTool.git
-cd GCCTool
+git clone
 
 # 2. 安装依赖
 go mod download
@@ -100,7 +96,7 @@ chmod +x build.sh
 ./build.sh
 
 # 4. 运行
-./gcc_helper_v3.0.0
+
 ```
 
 ---
@@ -134,28 +130,6 @@ func (c *Client) extractAttr(line, attrName string) string {
 }
 ```
 
-### 2. 修复日志显示问题
-
-**问题根源**:
-- `LogLabel` 和 `LogScroll` 使用不同的Label对象
-- logger更新LogLabel，但UI显示的是LogScroll里的Label
-
-**解决方案**:
-- 统一使用一个Label对象
-- LogScroll直接包装LogLabel
-
-**代码对比**:
-
-```go
-// 旧代码（有问题）
-LogLabel:  widget.NewLabel(""),
-LogScroll: container.NewScroll(widget.NewLabel("")), // ← 新的空Label！
-
-// 新代码（修复）
-LogLabel: widget.NewLabel(""),
-// LogScroll直接包装LogLabel
-LogScroll: container.NewScroll(ui.LogLabel),
-```
 
 ### 3. 简化代码结构
 
@@ -205,7 +179,7 @@ Robber (internal/robber/robber.go)
     ↓
 Client (internal/client/client.go)
     ↓
-教务系统API
+教务API
     ↓
 CourseList (internal/model/course.go)
     ↓
@@ -255,9 +229,6 @@ go test ./internal/client/
 # Linux/Mac
 ./build.sh
 
-# 自定义版本
-VERSION=3.0.1 ./build.sh
-```
 
 ---
 
@@ -317,22 +288,7 @@ VERSION=3.0.1 ./build.sh
 ### 如何使用
 
 1. **下载预构建版本**（推荐）
-   - 访问 Actions 页面下载最新构建
-   - 或访问 Releases 页面下载正式版本
-
-2. **自动触发构建**
-   ```bash
-   git push origin main  # 自动构建
-   git tag v3.0.1         # 创建Release
-   git push origin v3.0.1
-   ```
-
-3. **手动触发**
-   - 进入 Actions 页面
-   - 选择工作流
-   - 点击 "Run workflow"
-
-详细说明请查看 [GITHUB_ACTIONS_GUIDE.md](GITHUB_ACTIONS_GUIDE.md)。
+   - 访问 Releases 页面下载正式版本
 
 ---
 
@@ -369,6 +325,7 @@ Copyright (c) 2026 Rickeal-Boss
 本项目（V3.0）在原版 GCCTool（V1.1.0）的基础上进行了全面重构。
 V3.0 对核心逻辑、架构、UI 均进行了大规模重写（代码变化约 -28%，架构完全调整），
 但原版 GCCTool 的整体选课思路与部分业务逻辑为本项目提供了重要参考。
+可以支持竞品Efarxs/GCCTool star
 
 ### 第三方依赖
 
@@ -385,6 +342,6 @@ V3.0 对核心逻辑、架构、UI 均进行了大规模重写（代码变化约
 
 ---
 
-**版本**: V3.309.0
-**更新日期**: 2026-03-13
+**版本**: GCCTool-Ultimate-UI-v3.0.309.1-cnvrxnmn-Multi-Platform
+**更新日期**: 2026-03-15
 **状态**: ✅ 已完成重构
