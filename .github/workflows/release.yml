@@ -23,16 +23,17 @@ jobs:
             ldflags: "-s -w -H windowsgui"
             cgo: 1
           
-          # macOS
-          - os: macos-latest
+          # macOS Intel (amd64) — 必须用 Intel runner 本机编译，Fyne CGO 不支持交叉编译
+          - os: macos-13
             arch: amd64
             goos: darwin
             goarch: amd64
             output: gcc_helper
             output_debug: gcc_helper_debug
             ldflags: "-s -w"
-            cgo: 0
+            cgo: 1
           
+          # macOS Apple Silicon (arm64) — 用 arm64 runner 本机编译
           - os: macos-latest
             arch: arm64
             goos: darwin
@@ -40,7 +41,7 @@ jobs:
             output: gcc_helper_arm64
             output_debug: gcc_helper_debug_arm64
             ldflags: "-s -w"
-            cgo: 0
+            cgo: 1
           
           # Linux
           - os: ubuntu-latest
@@ -76,6 +77,12 @@ jobs:
         run: |
           go mod tidy
           go mod download
+
+      - name: Install macOS system dependencies (Fyne CGO build)
+        if: matrix.goos == 'darwin'
+        run: |
+          # Fyne 需要这些系统依赖才能通过 CGO 编译
+          brew install pkg-config
 
       - name: Build release binary
         env:
