@@ -197,8 +197,8 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	}
 	applyBrowserHeaders(req)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// ✅ 修复：Referer 路径补全 /jwglxt 前缀（正方 V9 要求）
-	req.Header.Set("Referer", c.baseURL+"/jwglxt/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
+	// gcc.edu.cn 部署无 /jwglxt 前缀，Referer 路径与选课首页保持一致
+	req.Header.Set("Referer", c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
 	req.Header.Set("Origin", c.baseURL)
 
 	resp, err := c.httpClient.Do(req)
@@ -223,8 +223,8 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	}
 	applyBrowserHeaders(req)
 	req.Header.Set("Content-Type", contentType)
-	// ✅ 修复：Referer 路径补全 /jwglxt 前缀
-	req.Header.Set("Referer", c.baseURL+"/jwglxt/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
+	// gcc.edu.cn 部署无 /jwglxt 前缀，Referer 路径与选课首页保持一致
+	req.Header.Set("Referer", c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
 	req.Header.Set("Origin", c.baseURL)
 
 	resp, err := c.httpClient.Do(req)

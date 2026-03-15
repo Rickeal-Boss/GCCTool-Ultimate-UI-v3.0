@@ -36,25 +36,26 @@ const (
 	pathLoginPost = "/xtgl/login_slogin.html"
 
 	// 选课首页（验证登录状态 + 获取 gnmkdm/xkkz_id 等动态参数）
-	pathSelectIndex = "/jwglxt/xsxk/zzxkyzb_cxZzxkYzbIndex.html"
+	// ⚠️ gcc.edu.cn 部署无 /jwglxt 前缀，路径直接从根开始
+	pathSelectIndex = "/xsxk/zzxkyzb_cxZzxkYzbIndex.html"
 
 	// 选课参数获取
-	pathSelectDisplay = "/jwglxt/xsxk/zzxkyzb_cxZzxkYzbDisplay.html"
+	pathSelectDisplay = "/xsxk/zzxkyzb_cxZzxkYzbDisplay.html"
 
 	// 课程列表（分页）
-	pathCourseList = "/jwglxt/xsxk/zzxkyzb_cxZzxkYzbPartDisplay.html"
+	pathCourseList = "/xsxk/zzxkyzb_cxZzxkYzbPartDisplay.html"
 
 	// 课程详情（获取 do_jxb_id 等加密 ID）
-	pathCourseInfo = "/jwglxt/xsxk/zzxkyzbjk_cxJxbWithKchZzxkYzb.html"
+	pathCourseInfo = "/xsxk/zzxkyzbjk_cxJxbWithKchZzxkYzb.html"
 
-	// 选课提交（正方 V9 路径，旧版为 _tjZzxkYzb，V9 改为此路径）
-	pathSelectSubmit = "/jwglxt/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html"
+	// 选课提交
+	pathSelectSubmit = "/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html"
 
 	// 已选课程查询
-	pathSelectedCourses = "/jwglxt/xsxk/zzxkyzb_cxYxkAndKc.html"
+	pathSelectedCourses = "/xsxk/zzxkyzb_cxYxkAndKc.html"
 
 	// 退课
-	pathCancelCourse = "/jwglxt/xsxk/zzxkyzb_tkZzxkYzb.html"
+	pathCancelCourse = "/xsxk/zzxkyzb_tkZzxkYzb.html"
 
 	// 功能模块代码（正方 V9 选课模块固定值，作为 URL Query 参数传递）
 	gnmkdmSelect = "N253512"
