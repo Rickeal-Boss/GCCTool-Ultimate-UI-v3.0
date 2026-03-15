@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,11 +119,41 @@ func applyBrowserHeaders(req *http.Request) {
 	}
 }
 
+// readResponseBody 读取 HTTP 响应体，自动处理 gzip 压缩
+//
+// 背景：applyBrowserHeaders 手动设置了 Accept-Encoding: gzip，
+// 一旦手动设置该 header，Go 的 Transport 就不再自动解压响应——
+// 官方文档明确说明：Transport 只有在"自己添加 Accept-Encoding"时才透明解压。
+// 因此所有手动构造 Request 的地方都必须调用此函数读取响应体。
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	var reader io.Reader = resp.Body
+
+	switch strings.ToLower(resp.Header.Get("Content-Encoding")) {
+	case "gzip":
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			// 如果 gzip 头读取失败，可能响应实际上不是 gzip，退回原始 body
+			reader = resp.Body
+		} else {
+			defer gr.Close()
+			reader = gr
+		}
+	case "deflate":
+		// deflate 使用标准 zlib，Go 标准库有 compress/zlib
+		// 但 deflate 在 HTTP 中实际极少使用，此处直接透传原始 body 即可
+		// （若遇到 deflate 再补充）
+	}
+
+	return io.ReadAll(reader)
+}
+
 // doGet GET请求（注入浏览器请求头，防止被 User-Agent 特征识别）
 //
-// 注意：http.Client 默认会跟随重定向，但不会把最终非 2xx 状态码视为错误。
-// 此处手动检查状态码，确保调用方拿到的是真正的业务响应，
-// 而非 302 目标页或 403/500 错误 HTML，防止上层把错误页面当 JSON 解析。
+// 注意：
+//   - http.Client 默认会跟随重定向，但不会把最终非 2xx 状态码视为错误。
+//     此处手动检查状态码，确保调用方拿到真正的业务响应。
+//   - applyBrowserHeaders 设置了 Accept-Encoding: gzip，
+//     导致 Go Transport 不再自动解压，必须手动调用 readResponseBody 解压。
 func (c *Client) doGet(rawURL string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -136,7 +167,7 @@ func (c *Client) doGet(rawURL string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
@@ -176,7 +207,7 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
@@ -202,7 +233,7 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}

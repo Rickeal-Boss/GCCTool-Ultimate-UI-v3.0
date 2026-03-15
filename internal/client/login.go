@@ -205,6 +205,8 @@ func (c *Client) fetchPublicKeyFromAPI() (string, error) {
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Referer", c.buildURL(pathLoginPage))
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// 禁用压缩：防止服务端强制 gzip 导致响应乱码（二级兜底由 readResponseBody 处理）
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -212,18 +214,19 @@ func (c *Client) fetchPublicKeyFromAPI() (string, error) {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("读取公钥响应失败: %w", err)
-	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("公钥接口返回非预期状态码 %d（URL: %s）", resp.StatusCode, apiURL)
 	}
 
+	// 使用统一的解压函数，应对服务端忽略 Accept-Encoding: identity 强制返回 gzip 的情况
+	bodyBytes, err := readResponseBody(resp)
+	if err != nil {
+		return "", fmt.Errorf("读取公钥响应失败: %w", err)
+	}
+
 	bodyStr := strings.TrimSpace(string(bodyBytes))
 	if !strings.HasPrefix(bodyStr, "{") {
-		// 响应不是 JSON（可能是被重定向到登录页的 HTML），截取前 200 字符帮助排查
+		// 响应不是 JSON（可能是被重定向到登录页的 HTML）
 		preview := bodyStr
 		if len(preview) > 200 {
 			preview = preview[:200] + "..."
@@ -236,21 +239,17 @@ func (c *Client) fetchPublicKeyFromAPI() (string, error) {
 		Exponent string `json:"exponent"`
 	}
 	if err := json.Unmarshal(bodyBytes, &keyResp); err != nil {
-		return "", fmt.Errorf("公钥接口响应JSON解析失败: %w（原始响应: %s）", err, bodyStr[:min(200, len(bodyStr))])
+		preview := bodyStr
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		return "", fmt.Errorf("公钥接口响应JSON解析失败: %w（原始响应: %s）", err, preview)
 	}
 	if keyResp.Modulus == "" || keyResp.Exponent == "" {
 		return "", fmt.Errorf("公钥接口返回了空的 modulus 或 exponent（原始响应: %s）", bodyStr)
 	}
 
 	return base64ModExpToBase64DER(keyResp.Modulus, keyResp.Exponent)
-}
-
-// min 返回两个 int 中较小的值（Go 1.22 已内置，此处显式定义确保兼容性）
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // base64ModExpToBase64DER 将 Base64 编码的 modulus+exponent 构造 RSA 公钥
@@ -500,7 +499,7 @@ func (c *Client) doPostWithReferer(rawURL string, data map[string]string, refere
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
