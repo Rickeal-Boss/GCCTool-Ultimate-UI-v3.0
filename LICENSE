@@ -1,4 +1,4 @@
-MIT License
+MIT License + Commons Clause
 
 Copyright (c) 2026 Rickeal-Boss
 
@@ -19,3 +19,47 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+Commons Clause Restriction
+
+"Commons Clause" License Condition v1.0
+
+The Software is provided to you by the Licensor under the License, as defined
+below, subject to the following condition.
+
+Without limiting other conditions in the License, the grant of rights under
+the License will not include, and the License does not grant to you, the right
+to Sell the Software.
+
+For purposes of the foregoing, "Sell" means practicing any or all of the rights
+granted to you under the License to provide to third parties, for a fee or other
+consideration (including without limitation fees for hosting or consulting/
+support services related to the Software), a product or service whose value
+derives, entirely or substantially, from the functionality of the Software.
+Any license notice or attribution required by the License must also include
+this Commons Clause License Condition notice.
+
+Software: GCCTool-Ultimate-UI-v3.0
+License: MIT
+Licensor: Rickeal-Boss
+
+---
+
+简体中文说明（非正式翻译，仅供参考）
+
+本软件采用 MIT + Commons Clause 许可证。
+
+您可以自由地：
+  - 使用、复制、修改本软件
+  - 分发本软件（包括修改后的版本）
+  - 将本软件用于个人、学习、研究等非商业目的
+
+但您不得：
+  - 将本软件或其衍生版本用于任何商业盈利目的
+  - 销售本软件或提供以本软件功能为核心的付费服务
+  - 在未经版权人书面授权的情况下进行任何商业行为
+
+版权所有 © 2026 Rickeal-Boss，保留所有权利。
+如需商业授权，请联系版权人获得书面许可。
