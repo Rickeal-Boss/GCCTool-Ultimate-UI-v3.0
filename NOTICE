@@ -1,8 +1,14 @@
-GCC 选课助手 V3.0
+GCCTool-Ultimate-UI-v3.0
 Copyright (c) 2026 Rickeal-Boss
+All rights reserved.
 
-本项目基于原版 GCCTool（V2.0）进行全面重构，V3.0 由作者本人完全重写。
+本项目基于原版 GCCTool 进行全面重构，V3.0 由作者本人以及使用辅助工具完全重写。
 原始版本版权归其原始作者所有。
+
+本项目采用 MIT License + Commons Clause 授权，禁止商业使用。
+详见 LICENSE 文件。
+
+---
 
 ================================================================================
 
