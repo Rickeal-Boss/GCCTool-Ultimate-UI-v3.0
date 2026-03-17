@@ -17,6 +17,7 @@ import (
 	"golang.org/x/net/html"
 
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
+	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/stealth"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -200,7 +201,7 @@ func (c *Client) fetchPublicKeyFromAPI() (string, error) {
 		return "", fmt.Errorf("构造公钥请求失败: %w", err)
 	}
 	// 注入浏览器基础头（含 User-Agent、Cookie jar 已由 httpClient 自动带上）
-	applyBrowserHeaders(req)
+	stealth.InjectHeaders(req)
 	// 覆盖 Accept 为 JSON，确保服务端返回 JSON 格式而非 HTML
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Referer", c.buildURL(pathLoginPage))
@@ -477,36 +478,6 @@ func (c *Client) checkLoginStatus() error {
 	}
 
 	return nil
-}
-
-// doPostWithReferer POST 请求，支持自定义 Referer
-// 登录表单提交时 Referer 应指向登录页自身，而非选课页
-func (c *Client) doPostWithReferer(rawURL string, data map[string]string, referer string) (string, error) {
-	values := url.Values{}
-	for k, v := range data {
-		values.Set(k, v)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(values.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("构造POST请求失败: %w", err)
-	}
-	applyBrowserHeaders(req)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Referer", referer)
-	req.Header.Set("Origin", c.baseURL)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("POST请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := readResponseBody(resp)
-	if err != nil {
-		return "", fmt.Errorf("读取响应失败: %w", err)
-	}
-	return string(body), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
