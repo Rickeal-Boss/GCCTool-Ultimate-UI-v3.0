@@ -5,26 +5,14 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"os"
 	"strings"
 	"time"
-)
 
-// browserHeaders 统一的浏览器请求头，模拟 Chrome 131 / Windows 10
-// 缺失 User-Agent、Referer、Accept 等头是自动化程序最典型的被检测特征
-var browserHeaders = map[string]string{
-	"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-	"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-	"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-	"Accept-Encoding": "gzip, deflate, br",
-	"Cache-Control":   "no-cache",
-	"Pragma":          "no-cache",
-	"Connection":      "keep-alive",
-}
+	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/stealth"
+)
 
 // nodeURLMap 节点显示名 → 真实 Base URL 的映射表
 //
@@ -48,110 +36,99 @@ var nodeURLMap = map[string]string{
 	"节点13（内网）": "http://172.22.14.8",
 }
 
-// NodeURLFromName 将节点显示名翻译为真实 Base URL（供外部包调用，例如 UI 层判断 HTTP/HTTPS）
-//
-// 找不到时返回默认外网节点 URL，不 panic、不返回 error —— 调用方只需拿到 URL 判断协议即可。
+// NodeURLFromName 将节点显示名翻译为真实 Base URL（供外部包调用）
 func NodeURLFromName(name string) string {
 	if u, ok := nodeURLMap[name]; ok {
 		return u
 	}
-	// 节点名匹配失败（空字符串或未知名称）时 fallback 到节点1；
-	// 此处不静默：调用方若依赖具体节点（如内网节点），需确保名称与 map key 一致。
 	return nodeURLMap["节点1（推荐）"]
 }
 
-// getNodeURL 内部使用：节点名 → Base URL（对 NodeURLFromName 的别名封装）
+// getNodeURL 内部使用：节点名 → Base URL
 func getNodeURL(node string) string {
 	return NodeURLFromName(node)
 }
 
 // Client HTTP客户端
+//
+// V3.1 升级：
+//   - 集成 stealth 反检测引擎（随机UA、随机语言头）
+//   - 集成熔断器（防止账号因高频请求被封禁）
+//   - 集成退避策略（触发限流时自动降速）
+//   - 请求超时从 30s 调整为 15s（快速失败，更快触发重试）
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
 	cookieJar  http.CookieJar
+
+	// 反检测组件
+	circuitBreaker  *stealth.CircuitBreaker
+	backoffStrategy *stealth.BackoffStrategy
+	delayProfile    stealth.DelayProfile
 }
 
 // NewClient 创建客户端
-//
-// nodeURL 为节点显示名（如 "节点1（推荐）"）或直接的 Base URL。
-// CookieJar 在此初始化，确保登录后的 Session Cookie 能跨请求保持。
 func NewClient(nodeURL string) *Client {
 	jar, _ := cookiejar.New(nil)
 
-	transport := &http.Transport{
-		// 响应头超时：防止服务端 hang 住连接不发响应头，导致 Worker 永久挂起
-		ResponseHeaderTimeout: 20 * time.Second,
-		// TLS 握手超时
-		TLSHandshakeTimeout: 10 * time.Second,
-		// 连接超时
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		// 禁止跳过 TLS 验证（明确设置，防止将来被意外修改）
-		// TLSClientConfig: nil → 使用系统根证书，已验证，无需修改
-	}
-
 	return &Client{
 		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
-			Jar:       jar,
-			Transport: transport,
+			Timeout: 15 * time.Second,
+			Jar:     jar,
 		},
 		baseURL:   getNodeURL(nodeURL),
 		cookieJar: jar,
+
+		// 默认熔断器：5次失败开路，冷却30s
+		circuitBreaker: stealth.NewCircuitBreaker("正方教务"),
+		// 退避策略：5s起步，最大60s，2倍指数增长，带抖动
+		backoffStrategy: stealth.NewBackoffStrategy(5*time.Second, 60*time.Second, 2.0, true),
+		delayProfile:    stealth.DelayNormal,
 	}
 }
 
 // NewClientWithProxy 创建带代理的客户端
-//
-// agentURL 格式示例：http://127.0.0.1:8080，空字符串表示不使用代理。
-// 代理地址仅在内存中使用，不持久化。
 func NewClientWithProxy(nodeURL, agentURL string) *Client {
 	jar, _ := cookiejar.New(nil)
 
-	transport := &http.Transport{
-		ResponseHeaderTimeout: 20 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-	}
+	transport := &http.Transport{}
 	if agentURL != "" {
 		if proxyURL, err := url.Parse(agentURL); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
-		} else {
-			// 代理地址解析失败：打印警告，程序继续直连运行（不 panic）
-			fmt.Fprintf(os.Stderr, "[WARN] 代理地址解析失败，将使用直连: %v\n", err)
 		}
 	}
 
 	return &Client{
 		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
+			Timeout:   15 * time.Second,
 			Jar:       jar,
 			Transport: transport,
 		},
 		baseURL:   getNodeURL(nodeURL),
 		cookieJar: jar,
+
+		circuitBreaker:  stealth.NewCircuitBreaker("正方教务（代理）"),
+		backoffStrategy: stealth.NewBackoffStrategy(5*time.Second, 60*time.Second, 2.0, true),
+		delayProfile:    stealth.DelayNormal,
 	}
 }
 
-// applyBrowserHeaders 将标准浏览器请求头批量注入请求
-func applyBrowserHeaders(req *http.Request) {
-	for k, v := range browserHeaders {
-		req.Header.Set(k, v)
-	}
+// SetDelayProfile 动态调整延迟档位（外部可调用，如即将开抢时切 Aggressive）
+func (c *Client) SetDelayProfile(p stealth.DelayProfile) {
+	c.delayProfile = p
+}
+
+// CircuitBreaker 暴露熔断器（供 robber 查询状态）
+func (c *Client) CircuitBreaker() *stealth.CircuitBreaker {
+	return c.circuitBreaker
+}
+
+// BackoffStrategy 暴露退避策略（供 robber 查询/重置）
+func (c *Client) BackoffStrategy() *stealth.BackoffStrategy {
+	return c.backoffStrategy
 }
 
 // readResponseBody 读取 HTTP 响应体，自动处理 gzip 压缩
-//
-// 背景：applyBrowserHeaders 手动设置了 Accept-Encoding: gzip，
-// 一旦手动设置该 header，Go 的 Transport 就不再自动解压响应——
-// 官方文档明确说明：Transport 只有在"自己添加 Accept-Encoding"时才透明解压。
-// 因此所有手动构造 Request 的地方都必须调用此函数读取响应体。
 func readResponseBody(resp *http.Response) ([]byte, error) {
 	var reader io.Reader = resp.Body
 
@@ -159,60 +136,79 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 	case "gzip":
 		gr, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			// 如果 gzip 头读取失败，可能响应实际上不是 gzip，退回原始 body
 			reader = resp.Body
 		} else {
 			defer gr.Close()
 			reader = gr
 		}
-	case "deflate":
-		// deflate 使用标准 zlib，Go 标准库有 compress/zlib
-		// 但 deflate 在 HTTP 中实际极少使用，此处直接透传原始 body 即可
-		// （若遇到 deflate 再补充）
 	}
 
 	return io.ReadAll(reader)
 }
 
-// doGet GET请求（注入浏览器请求头，防止被 User-Agent 特征识别）
-//
-// 注意：
-//   - http.Client 默认会跟随重定向，但不会把最终非 2xx 状态码视为错误。
-//     此处手动检查状态码，确保调用方拿到真正的业务响应。
-//   - applyBrowserHeaders 设置了 Accept-Encoding: gzip，
-//     导致 Go Transport 不再自动解压，必须手动调用 readResponseBody 解压。
+// doGet GET请求（集成反检测引擎 + 熔断器检查）
 func (c *Client) doGet(rawURL string) (string, error) {
+	// 熔断器检查
+	if err := c.circuitBreaker.Allow(); err != nil {
+		return "", err
+	}
+
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("构造GET请求失败: %w", err)
 	}
-	applyBrowserHeaders(req)
+
+	// 使用随机化请求头（反检测核心）
+	stealth.InjectHeaders(req)
+	// GET 请求添加 Accept（覆盖 InjectHeaders 中未设置的）
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.circuitBreaker.RecordFailure()
 		return "", fmt.Errorf("GET请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := readResponseBody(resp)
 	if err != nil {
+		c.circuitBreaker.RecordFailure()
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
 
+	bodyStr := string(body)
+
+	// 风控信号检测
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	switch {
+	case signal.ShouldStop():
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-停止] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldBackoff():
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-限流] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldReLogin():
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.circuitBreaker.RecordFailure()
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Request.URL.String())
 	}
 
-	return string(body), nil
+	c.circuitBreaker.RecordSuccess()
+	c.backoffStrategy.Reset() // 成功时重置退避计时器
+	return bodyStr, nil
 }
 
-// doPost POST请求（注入浏览器请求头，包含 Referer 和 Origin 防 CSRF 校验失败）
-//
-// Referer 修复说明：
-//   正方 V9 所有选课接口均在 /jwglxt/ 路径下，Referer 必须携带 /jwglxt 前缀，
-//   否则服务端 Referer 检查可能返回 403 或重定向到登录页。
-//   之前写的 "/xsxk/zzxkyzb_cxZzxkYzbIndex.html" 缺少 "/jwglxt" 导致 Referer 校验失败。
+// doPost POST请求（集成反检测引擎）
 func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
+	// 熔断器检查
+	if err := c.circuitBreaker.Allow(); err != nil {
+		return "", err
+	}
+
 	values := url.Values{}
 	for k, v := range data {
 		values.Set(k, v)
@@ -222,36 +218,94 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("构造POST请求失败: %w", err)
 	}
-	applyBrowserHeaders(req)
+
+	// AJAX 风格头（选课接口均为 AJAX 调用）
+	stealth.InjectAJAXHeaders(req, c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// gcc.edu.cn 部署无 /jwglxt 前缀，Referer 路径与选课首页保持一致
-	req.Header.Set("Referer", c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
 	req.Header.Set("Origin", c.baseURL)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.circuitBreaker.RecordFailure()
 		return "", fmt.Errorf("POST请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := readResponseBody(resp)
 	if err != nil {
+		c.circuitBreaker.RecordFailure()
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
 
-	return string(body), nil
+	bodyStr := string(body)
+
+	// 风控信号检测
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	switch {
+	case signal.ShouldStop():
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-停止] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldBackoff():
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-限流] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldReLogin():
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
+	}
+
+	c.circuitBreaker.RecordSuccess()
+	return bodyStr, nil
 }
 
-// doPostWithBytes POST请求（发送原始字节，注入浏览器请求头）
+// doPostWithBytes POST请求（发送原始字节）
 func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string) (string, error) {
+	if err := c.circuitBreaker.Allow(); err != nil {
+		return "", err
+	}
+
 	req, err := http.NewRequest(http.MethodPost, rawURL, bytes.NewBuffer(data))
 	if err != nil {
 		return "", fmt.Errorf("构造POST请求失败: %w", err)
 	}
-	applyBrowserHeaders(req)
+
+	stealth.InjectAJAXHeaders(req, c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
 	req.Header.Set("Content-Type", contentType)
-	// gcc.edu.cn 部署无 /jwglxt 前缀，Referer 路径与选课首页保持一致
-	req.Header.Set("Referer", c.baseURL+"/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
+	req.Header.Set("Origin", c.baseURL)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.circuitBreaker.RecordFailure()
+		return "", fmt.Errorf("POST请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := readResponseBody(resp)
+	if err != nil {
+		c.circuitBreaker.RecordFailure()
+		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	c.circuitBreaker.RecordSuccess()
+	return string(body), nil
+}
+
+// doPostWithReferer POST 请求，支持自定义 Referer（登录专用）
+func (c *Client) doPostWithReferer(rawURL string, data map[string]string, referer string) (string, error) {
+	values := url.Values{}
+	for k, v := range data {
+		values.Set(k, v)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(values.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("构造POST请求失败: %w", err)
+	}
+
+	// 登录请求使用页面导航头（非 AJAX）
+	stealth.InjectHeaders(req)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", referer)
 	req.Header.Set("Origin", c.baseURL)
 
 	resp, err := c.httpClient.Do(req)
@@ -264,8 +318,26 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
-
 	return string(body), nil
+}
+
+// CheckSessionAlive 检查 Session 是否仍然有效（保活用）
+//
+// 访问系统首页，若返回登录页则 Session 已失效。
+func (c *Client) CheckSessionAlive() error {
+	body, err := c.doGet(c.buildURL("/xtgl/index_index.html"))
+	if err != nil {
+		return err
+	}
+	if strings.Contains(body, "login_slogin") || strings.Contains(body, `type="password"`) {
+		return fmt.Errorf("Session 已过期")
+	}
+	return nil
+}
+
+// DelayProfile 返回当前延迟档位（供 robber 读取）
+func (c *Client) DelayProfile() stealth.DelayProfile {
+	return c.delayProfile
 }
 
 // buildURL 构建完整URL

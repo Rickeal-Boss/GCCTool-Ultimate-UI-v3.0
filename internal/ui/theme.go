@@ -7,43 +7,55 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// materialYellowTheme 黄色背景 Material 风格主题
+// materialYellowTheme — Material Design 3 "Amber Gold" 桌面主题
 //
-// 调色板来自 Material Design 3 "Amber" 配色方案：
-//   - 背景    Amber 50    #FFF8E1
-//   - 主色    Amber 700   #FFB300
-//   - 卡片    白色         #FFFFFF
-//   - 前景    深灰         #212121
-//   - 危险    Red 600      #E53935
-//   - 成功    Green 600    #43A047
+// 设计语言：
+//   - 背景      Amber 50 暖白  #FFF8E1  — 温暖不刺眼，呼吸感强
+//   - 主色      Amber 700      #FFB300  — 高饱和强调色，用于交互焦点
+//   - 深主色    Amber 800      #FF8F00  — 渐变底色、边框强调
+//   - 卡片      纯白 + 微投影   #FFFFFF  — 与背景形成清晰层次
+//   - 文字      近黑 Ink       #1A1A2E  — 高对比，阅读舒适
+//   - 次要文字  Slate 400      #94A3B8  — 提示/占位/禁用
+//   - 成功      Emerald 600    #059669
+//   - 危险      Rose 600       #E53935
+//   - 信息      Indigo 500     #6366F1
 type materialYellowTheme struct{}
 
 var _ fyne.Theme = (*materialYellowTheme)(nil)
 
-// ── Material Yellow 调色板 ───────────────────────────────────────────────────
+// ── 设计令牌（Design Tokens）────────────────────────────────────────────────
 var (
-	// 背景色：温暖的 Amber 50，不过曝
-	mdBackground = color.NRGBA{R: 0xFF, G: 0xF8, B: 0xE1, A: 0xFF}
-	// 卡片/surface 色：纯白，与背景形成层次
-	mdSurface = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
-	// 主色：Material Amber 700
-	mdPrimary = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF}
-	// 前景/文字色：深灰，高对比
-	mdForeground = color.NRGBA{R: 0x21, G: 0x21, B: 0x21, A: 0xFF}
-	// 次要文字 / 禁用色
-	mdDisabled = color.NRGBA{R: 0x9E, G: 0x9E, B: 0x9E, A: 0xFF}
-	// 危险色：Material Red 600
-	mdDanger = color.NRGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF}
-	// 成功色：Material Green 600
-	mdSuccess = color.NRGBA{R: 0x43, G: 0xA0, B: 0x47, A: 0xFF}
-	// 输入框焦点色（Amber 半透明，柔和不刺眼）
-	mdFocus = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x50}
-	// 分隔线
-	mdSeparator = color.NRGBA{R: 0xE0, G: 0xE0, B: 0xE0, A: 0xFF}
-	// 阴影色（半透明黑，用于卡片投影）
-	mdShadow = color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x20}
-	// 选中高亮（Amber 15% 透明）
-	mdSelection = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x3D}
+	// ── Surface & Background
+	mdBackground = color.NRGBA{R: 0xFF, G: 0xF8, B: 0xE1, A: 0xFF} // Amber 50
+	mdSurface    = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF} // 纯白卡片
+
+	// ── Brand / Amber
+	mdPrimary     = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF} // Amber 700
+	mdPrimaryDark = color.NRGBA{R: 0xFF, G: 0x8F, B: 0x00, A: 0xFF} // Amber 800（深色变体）
+	mdPrimaryDim  = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x28} // 15% 透明，用于 hover/selection
+
+	// ── Foreground / Typography
+	mdForeground    = color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xFF} // Ink 近黑
+	mdForegroundSub = color.NRGBA{R: 0x4A, G: 0x5A, B: 0x7A, A: 0xFF} // Slate 600，次要正文
+	mdDisabled      = color.NRGBA{R: 0x9E, G: 0xA3, B: 0xB8, A: 0xFF} // Slate 400
+
+	// ── Semantic Colors
+	mdSuccess = color.NRGBA{R: 0x05, G: 0x96, B: 0x69, A: 0xFF} // Emerald 600
+	mdDanger  = color.NRGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF} // Rose 600
+	mdWarning = color.NRGBA{R: 0xFF, G: 0x6F, B: 0x00, A: 0xFF} // Deep Orange 800
+	mdInfo    = color.NRGBA{R: 0x63, G: 0x66, B: 0xF1, A: 0xFF} // Indigo 500
+
+	// ── State Colors
+	mdFocus     = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x55} // Amber focus ring
+	mdSelection = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x3A} // 23% 选中高亮
+
+	// ── Structural
+	mdSeparator = color.NRGBA{R: 0xE8, G: 0xEC, B: 0xF0, A: 0xFF} // 轻量分割线
+	mdShadow    = color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0x1A} // 10% ink 阴影
+
+	// ── Input
+	mdInputBg     = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
+	mdInputBorder = color.NRGBA{R: 0xC8, G: 0xCC, B: 0xD8, A: 0xFF} // 冷灰边框
 )
 
 func (m *materialYellowTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
@@ -55,7 +67,7 @@ func (m *materialYellowTheme) Color(name fyne.ThemeColorName, variant fyne.Theme
 	case theme.ColorNameDisabled:
 		return mdDisabled
 	case theme.ColorNameDisabledButton:
-		return color.NRGBA{R: 0xE0, G: 0xE0, B: 0xE0, A: 0xFF}
+		return color.NRGBA{R: 0xDC, G: 0xE0, B: 0xE8, A: 0xFF}
 	case theme.ColorNameError:
 		return mdDanger
 	case theme.ColorNameFocus:
@@ -63,13 +75,12 @@ func (m *materialYellowTheme) Color(name fyne.ThemeColorName, variant fyne.Theme
 	case theme.ColorNameForeground:
 		return mdForeground
 	case theme.ColorNameHover:
-		// Amber 12% 透明，悬停时轻微高亮
+		// Amber 12%：悬停轻微高亮，不过于突出
 		return color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x1F}
 	case theme.ColorNameInputBackground:
-		return mdSurface
+		return mdInputBg
 	case theme.ColorNameInputBorder:
-		// 输入框边框略深，比默认更清晰
-		return color.NRGBA{R: 0xBD, G: 0xBD, B: 0xBD, A: 0xFF}
+		return mdInputBorder
 	case theme.ColorNameMenuBackground:
 		return mdSurface
 	case theme.ColorNameOverlayBackground:
@@ -81,8 +92,8 @@ func (m *materialYellowTheme) Color(name fyne.ThemeColorName, variant fyne.Theme
 	case theme.ColorNamePrimary:
 		return mdPrimary
 	case theme.ColorNameScrollBar:
-		// 滚动条：Amber 50% 透明，可见但不突兀
-		return color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x7F}
+		// Amber 40%：可见但柔和
+		return color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x66}
 	case theme.ColorNameSeparator:
 		return mdSeparator
 	case theme.ColorNameShadow:
@@ -90,7 +101,7 @@ func (m *materialYellowTheme) Color(name fyne.ThemeColorName, variant fyne.Theme
 	case theme.ColorNameSuccess:
 		return mdSuccess
 	case theme.ColorNameWarning:
-		return color.NRGBA{R: 0xFF, G: 0x6F, B: 0x00, A: 0xFF}
+		return mdWarning
 	case theme.ColorNameSelection:
 		return mdSelection
 	}
@@ -107,40 +118,40 @@ func (m *materialYellowTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
 
 func (m *materialYellowTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
-	// 外边距：卡片之间留 10px，比默认 4px 宽松
+	// 外边距：卡片间距 12px（比默认 4px 宽松，信息密度更佳）
 	case theme.SizeNamePadding:
-		return 10
-	// 内边距：卡片内容与边框 10px
+		return 12
+	// 内边距：卡片内容留白 10px
 	case theme.SizeNameInnerPadding:
 		return 10
-	// 正文字号 14px（Windows 默认 13px 略小）
+	// 正文字号：15px（Windows 默认 13px 略小，视觉更舒适）
 	case theme.SizeNameText:
-		return 14
-	// 标题字号 20px
+		return 15
+	// 标题字号：22px
 	case theme.SizeNameHeadingText:
-		return 20
-	// 副标题 16px
+		return 22
+	// 副标题：17px
 	case theme.SizeNameSubHeadingText:
-		return 16
-	// 小文字（hint、badge）12px
+		return 17
+	// 小文字（hint、badge）：12px
 	case theme.SizeNameCaptionText:
 		return 12
-	// 输入框边框宽度 1.5px（稍粗，更清晰）
+	// 输入框边框：1.5px（稍粗，更清晰）
 	case theme.SizeNameInputBorder:
 		return 1.5
-	// 输入框最小高度 38px（和 LiquidButton 对齐）
+	// 输入框圆角：7px（比卡片略小，层次感）
 	case theme.SizeNameInputRadius:
-		return 6
-	// 滚动条宽度 7px（比默认 4px 更容易抓）
-	case theme.SizeNameScrollBar:
 		return 7
-	// 悬停时细滚动条 3px
+	// 滚动条宽度：8px（更易抓握）
+	case theme.SizeNameScrollBar:
+		return 8
+	// 悬停细滚动条：4px
 	case theme.SizeNameScrollBarSmall:
-		return 3
-	// 图标尺寸 20px（比默认 18px 略大，更易识别）
+		return 4
+	// 图标尺寸：22px（比默认 18px 大，易识别）
 	case theme.SizeNameInlineIcon:
-		return 20
-	// 分割线 1px
+		return 22
+	// 分割线：1px（纤细，不喧宾夺主）
 	case theme.SizeNameSeparatorThickness:
 		return 1
 	}

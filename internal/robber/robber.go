@@ -3,68 +3,105 @@ package robber
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/client"
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
+	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/stealth"
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/pkg/logger"
 )
 
-const (
-	// baseIntervalMs 每轮选课请求之间的基础等待时间（毫秒）
-	// 加上随机 jitter 后实际范围 200~500ms，避免多 Worker 同步发包形成脉冲
-	baseIntervalMs = 200
-	// jitterMs 随机抖动上限（毫秒）
-	jitterMs = 300
+// ─────────────────────────────────────────────────────────────────────────────
+// 常量配置
+// ─────────────────────────────────────────────────────────────────────────────
 
-	// rateLimitBackoffBase 被限流（429/503/"频繁"）时的初始退避秒数
+const (
+	// maxReLoginAttempts Session 失效后最大自动重新登录次数
+	maxReLoginAttempts = 3
+
+	// rateLimitBackoffBase 初始限流退避（秒）
 	rateLimitBackoffBase = 5
-	// rateLimitBackoffMax 被限流时的最大退避秒数
+	// rateLimitBackoffMax 最大限流退避（秒）
 	rateLimitBackoffMax = 60
+
+	// aggressiveThresholdSec 距离开始时间多少秒内切换到激进模式
+	aggressiveThresholdSec = 30
+
+	// sessionKeepaliveInterval Session 保活间隔（每隔此时间访问一次首页）
+	sessionKeepaliveInterval = 4 * time.Minute
 )
 
-// Robber 抢课调度器
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker 风控状态机
+// ─────────────────────────────────────────────────────────────────────────────
+
+// workerState Worker 运行状态（用于反检测策略切换）
+type workerState int
+
+const (
+	wsNormal       workerState = iota // 正常模式
+	wsRateLimited                     // 限流退避中
+	wsRelogging                       // 重新登录中
+	wsBanned                          // 账号封禁，永久停止
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Robber 核心结构
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Robber 抢课调度器 V3.1
+//
+// V3.1 新增能力：
+//  1. 风控信号分级处理：限流退避 / Session重登 / 封号停止
+//  2. 自动重新登录：Session 失效时最多重试 3 次
+//  3. 人性化请求节奏：距开抢时间 <30s 切换激进模式，其余时间使用随机化延迟
+//  4. Session 保活：等待期间每 4 分钟轻量 GET 一次，防止 Session 超时
+//  5. 详细的风控告警日志：用户可以看到实时的反检测状态
 type Robber struct {
 	client *client.Client
 	logger *logger.Logger
 	config *model.Config
 
-	running int32 // atomic: 0=stopped, 1=running
+	running bool
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
-	// extraCache 缓存 courseID → CourseExtra，避免每轮都重新请求 GetClassInfo
-	extraCache map[string]*model.CourseExtra
-	extraMu    sync.RWMutex
+	// 统计计数器
+	successCount int
+	failCount    int
+	reloginCount int
+	mu           sync.Mutex
 }
 
 // NewRobber 创建抢课调度器
 func NewRobber(clt *client.Client, log *logger.Logger) *Robber {
 	return &Robber{
-		client:     clt,
-		logger:     log,
-		extraCache: make(map[string]*model.CourseExtra),
+		client: clt,
+		logger: log,
 	}
 }
 
-// Start 登录并在后台启动抢课任务，立即返回（非阻塞）
-//
-// 调用方（ui/main.go）已在 go func() 中调用，此处不应再调用 time.Sleep 或 wg.Wait，
-// 否则会把 UI goroutine 永久挂起，导致停止按钮无响应。
-//
-// 流程：
-//  1. 同步登录（有错误立即返回，让 UI 显示错误信息）
-//  2. 启动独立 goroutine 等待开始时间，时间到后启动 Worker
+// ─────────────────────────────────────────────────────────────────────────────
+// Start / Stop
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Start 登录并在后台启动抢课任务（非阻塞）
 func (r *Robber) Start(cfg *model.Config) error {
-	if !atomic.CompareAndSwapInt32(&r.running, 0, 1) {
+	if r.running {
 		return fmt.Errorf("抢课已经在运行中")
 	}
 
 	r.config = cfg
+	r.running = true
+	r.successCount = 0
+	r.failCount = 0
+	r.reloginCount = 0
+
+	// 重置熔断器和退避（新任务从干净状态开始）
+	r.client.CircuitBreaker().Reset()
+	r.client.BackoffStrategy().Reset()
 
 	if r.cancel != nil {
 		r.cancel()
@@ -73,23 +110,23 @@ func (r *Robber) Start(cfg *model.Config) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
-	// 步骤1：同步登录（每次 Start 都新建了 Client，Cookie Jar 为空，必须重新登录）
+	// 同步登录
 	r.logger.Info("正在登录教务系统...")
 	if err := r.client.Login(cfg); err != nil {
-		atomic.StoreInt32(&r.running, 0)
+		r.running = false
 		cancel()
 		return fmt.Errorf("登录失败: %w", err)
 	}
-	r.logger.Info("登录成功")
+	r.logger.Success("登录成功")
 
-	// 步骤2：在后台 goroutine 里等待开始时间，到点再启动 Worker
-	// 不在此处阻塞，UI 线程可以继续响应停止按钮
+	// 后台调度 goroutine
 	go func() {
 		startTime := r.calculateStartTime()
 		r.logger.Info(fmt.Sprintf("计划开始时间: %s", startTime.Format("15:04:05")))
-		r.waitUntil(ctx, startTime)
 
-		// 检查是否已被停止（等待期间用户可能点了停止）
+		// 等待开始时间（期间保活 Session）
+		r.waitWithKeepalive(ctx, startTime)
+
 		select {
 		case <-ctx.Done():
 			r.logger.Info("等待期间任务已取消")
@@ -97,7 +134,7 @@ func (r *Robber) Start(cfg *model.Config) error {
 		default:
 		}
 
-		r.logger.Info("开始抢课...")
+		r.logger.Info("🚀 开始抢课！")
 		r.startWorkers(ctx)
 	}()
 
@@ -105,27 +142,38 @@ func (r *Robber) Start(cfg *model.Config) error {
 }
 
 // Stop 停止抢课
-//
-// 仅发送取消信号，不阻塞等待 Worker 退出。
-// Worker 会在下一轮循环检测到 ctx.Done() 后自行退出，
-// 避免在 UI 线程中调用 wg.Wait() 导致界面冻结。
 func (r *Robber) Stop() {
-	if !atomic.CompareAndSwapInt32(&r.running, 1, 0) {
+	if !r.running {
 		return
 	}
 
 	r.logger.Info("正在停止抢课...")
+	r.running = false
 
 	if r.cancel != nil {
 		r.cancel()
 	}
 
-	// 在后台等待 Worker 退出，完成后记录日志
 	go func() {
 		r.wg.Wait()
-		r.logger.Info("抢课已停止")
+		r.mu.Lock()
+		sc, fc, rc := r.successCount, r.failCount, r.reloginCount
+		r.mu.Unlock()
+		r.logger.Info(fmt.Sprintf(
+			"抢课已停止 | 成功: %d | 失败: %d | 重新登录: %d | 熔断器: %s",
+			sc, fc, rc, r.client.CircuitBreaker().StateName(),
+		))
 	}()
 }
+
+// IsRunning 返回当前是否正在运行
+func (r *Robber) IsRunning() bool {
+	return r.running
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 等待策略
+// ─────────────────────────────────────────────────────────────────────────────
 
 // calculateStartTime 计算目标开始时间（含提前量）
 func (r *Robber) calculateStartTime() time.Time {
@@ -135,33 +183,77 @@ func (r *Robber) calculateStartTime() time.Time {
 		r.config.Hour, r.config.Minute, 0, 0,
 		now.Location(),
 	)
-
 	target = target.Add(-time.Duration(r.config.Advance) * time.Minute)
 
-	// 目标时间已过，改为明天同一时刻
 	if target.Before(now) {
 		target = target.Add(24 * time.Hour)
 	}
-
 	return target
 }
 
-// waitUntil 可中断地等待到目标时间
+// waitWithKeepalive 等待到目标时间，期间定期保活 Session
 //
-// 接受 ctx，用户点停止时可立即退出，不会卡在 time.Sleep 直到开始时间
-func (r *Robber) waitUntil(ctx context.Context, target time.Time) {
-	duration := time.Until(target)
-	if duration <= 0 {
-		return
-	}
+// 保活原理：正方系统 Session 一般 10-30 分钟超时，
+// 每隔 4 分钟访问一次系统首页（轻量 GET）可重置超时计时器。
+// 这避免了"登录成功 → 等待 30 分钟 → Session 过期 → 开始时登录失效"的问题。
+func (r *Robber) waitWithKeepalive(ctx context.Context, target time.Time) {
+	keepaliveTick := time.NewTicker(sessionKeepaliveInterval)
+	defer keepaliveTick.Stop()
 
-	r.logger.Info(fmt.Sprintf("等待 %d 分 %d 秒...", int(duration.Minutes()), int(duration.Seconds())%60))
+	for {
+		remaining := time.Until(target)
+		if remaining <= 0 {
+			return
+		}
 
-	select {
-	case <-ctx.Done():
-	case <-time.After(duration):
+		// 距开始 <30s 时，退出等待循环（进入激进模式）
+		if remaining <= aggressiveThresholdSec*time.Second {
+			r.logger.Info(fmt.Sprintf("⚡ 距开始 %.0f 秒，切换激进模式", remaining.Seconds()))
+			r.client.SetDelayProfile(stealth.DelayAggressive)
+			// 精确等待剩余时间
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(remaining):
+				return
+			}
+		}
+
+		r.logger.Info(fmt.Sprintf("⏱ 等待 %d 分 %d 秒...", int(remaining.Minutes()), int(remaining.Seconds())%60))
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second): // 每 10 秒重新检查剩余时间（输出倒计时）
+			// 继续循环
+		case <-keepaliveTick.C:
+			// 执行保活请求
+			r.doKeepalive(ctx)
+		}
 	}
 }
+
+// doKeepalive 执行 Session 保活请求（访问系统首页）
+func (r *Robber) doKeepalive(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+	r.logger.Info("🔑 Session 保活中...")
+	// 访问主页（轻量 GET，不提交任何数据）
+	if err := r.client.CheckSessionAlive(); err != nil {
+		r.logger.Warn(fmt.Sprintf("Session 保活失败: %v", err))
+		// 尝试重新登录
+		r.tryRelogin(ctx, 1)
+	} else {
+		r.logger.Info("✓ Session 保活成功")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker 管理
+// ─────────────────────────────────────────────────────────────────────────────
 
 // startWorkers 启动指定数量的并发 Worker
 func (r *Robber) startWorkers(ctx context.Context) {
@@ -171,19 +263,24 @@ func (r *Robber) startWorkers(ctx context.Context) {
 	}
 }
 
-// worker 抢课 Worker
+// worker 抢课 Worker（V3.1 风控感知版）
 //
-// 每轮只发一次选课提交请求（do_jxb_id 在启动前缓存好）。
-// 被限流时使用指数退避；ctx 取消时立即退出。
+// 核心风控处理逻辑：
+//  1. [风控-停止]  → 立即结束此 Worker，广播停止信号
+//  2. [风控-会话]  → 触发重新登录，最多重试 maxReLoginAttempts 次
+//  3. [风控-限流]  → 指数退避等待后重试
+//  4. 正常失败     → 短暂延迟后继续重试
 func (r *Robber) worker(ctx context.Context, id int) {
 	defer r.wg.Done()
 
 	r.logger.Info(fmt.Sprintf("Worker %d 启动", id))
 
-	// backoffSec：当前退避秒数，0 表示正常节奏
+	state := wsNormal
 	backoffSec := 0
+	reloginAttempts := 0
 
 	for {
+		// 检查停止信号
 		select {
 		case <-ctx.Done():
 			r.logger.Info(fmt.Sprintf("Worker %d 停止", id))
@@ -191,54 +288,120 @@ func (r *Robber) worker(ctx context.Context, id int) {
 		default:
 		}
 
-		// 限流退避：等待后再发请求
-		if backoffSec > 0 {
-			r.logger.Warn(fmt.Sprintf("Worker %d 限流保护，等待 %ds 后重试", id, backoffSec))
+		// 熔断器检查（熔断时等待，不是退出）
+		if cbErr := r.client.CircuitBreaker().Allow(); cbErr != nil {
+			r.logger.Warn(fmt.Sprintf("Worker %d 熔断器阻断: %v", id, cbErr))
+			// 等待熔断冷却，期间可响应停止信号
 			select {
 			case <-ctx.Done():
-				r.logger.Info(fmt.Sprintf("Worker %d 停止", id))
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		// 限流退避
+		if backoffSec > 0 {
+			r.logger.Warn(fmt.Sprintf("Worker %d 退避等待 %ds...", id, backoffSec))
+			select {
+			case <-ctx.Done():
 				return
 			case <-time.After(time.Duration(backoffSec) * time.Second):
 			}
 		}
 
 		err := r.robCourse(id)
-		switch {
-		case err == nil:
+
+		if err == nil {
+			r.mu.Lock()
+			r.successCount++
+			r.mu.Unlock()
 			backoffSec = 0
-		case isRateLimited(err.Error()):
-			// 指数退避：5 → 10 → 20 → ... → 60s
+			state = wsNormal
+			// 成功后保持一段延迟再继续，避免 Worker 继续轰炸
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(stealth.JitteredDelay(stealth.DelayNormal)):
+			}
+			continue
+		}
+
+		errMsg := err.Error()
+		r.mu.Lock()
+		r.failCount++
+		r.mu.Unlock()
+
+		switch {
+		case isBannedError(errMsg):
+			// 账号封禁：立刻停止所有 Worker
+			r.logger.Error(fmt.Sprintf("🚨 Worker %d 检测到账号封禁信号！立即停止所有任务！原因: %v", id, err))
+			r.running = false
+			r.cancel() // 广播停止信号给所有 Worker
+			return
+
+		case isSessionError(errMsg):
+			// Session 失效：尝试重新登录
+			reloginAttempts++
+			r.mu.Lock()
+			r.reloginCount++
+			r.mu.Unlock()
+			state = wsRelogging
+
+			if reloginAttempts > maxReLoginAttempts {
+				r.logger.Error(fmt.Sprintf("Worker %d Session 失效，重新登录已达上限 %d 次，停止此 Worker", id, maxReLoginAttempts))
+				return
+			}
+
+			r.logger.Warn(fmt.Sprintf("Worker %d Session 失效，正在重新登录（第 %d/%d 次）...", id, reloginAttempts, maxReLoginAttempts))
+			if loginErr := r.tryRelogin(ctx, reloginAttempts); loginErr != nil {
+				r.logger.Error(fmt.Sprintf("Worker %d 重新登录失败: %v", id, loginErr))
+				// 短暂等待后再试
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(3 * time.Second):
+				}
+			} else {
+				r.logger.Success(fmt.Sprintf("Worker %d 重新登录成功", id))
+				reloginAttempts = 0
+				state = wsNormal
+			}
+
+		case isRateLimitError(errMsg):
+			// 限流：指数退避
+			state = wsRateLimited
 			if backoffSec == 0 {
 				backoffSec = rateLimitBackoffBase
 			} else {
 				backoffSec = min(backoffSec*2, rateLimitBackoffMax)
 			}
-			r.logger.Warn(fmt.Sprintf("Worker %d 检测到限流: %v", id, err))
+			r.logger.Warn(fmt.Sprintf("Worker %d 触发限流，退避 %ds: %v", id, backoffSec, err))
+
 		default:
+			// 普通失败：重置退避，短暂等待后继续
 			backoffSec = 0
+			state = wsNormal
 			r.logger.Error(fmt.Sprintf("Worker %d 抢课失败: %v", id, err))
 		}
 
-		// 每轮结束后随机延迟，错开多 Worker 的发包时间点
-		jitter := rand.Intn(jitterMs)
+		// 每轮结束后随机延迟（反检测：避免机械均匀间隔）
+		_ = state // 未来可根据 state 进一步差异化延迟
+		delay := stealth.JitteredDelay(r.client.DelayProfile())
 		select {
 		case <-ctx.Done():
-			r.logger.Info(fmt.Sprintf("Worker %d 停止", id))
 			return
-		case <-time.After(time.Duration(baseIntervalMs+jitter) * time.Millisecond):
+		case <-time.After(delay):
 		}
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 抢课逻辑
+// ─────────────────────────────────────────────────────────────────────────────
+
 // robCourse 执行一轮抢课逻辑
-//
-// 请求次数优化：
-//   - 每轮只调用 GetClassList（1次）+ SelectCourse（1次/课程）
-//   - GetClassInfo 仅在第一次遇到某门课时调用，do_jxb_id 缓存在 r.extraCache 里
-//     （不能缓存在 course.Extra，因为 GetClassList 每轮返回全新的 *Course 对象）
-//   - SelectCourse 不再重复 GET 首页 + POST display（已移至 client 层缓存）
 func (r *Robber) robCourse(workerID int) error {
-	// 获取课程列表（含剩余名额信息）
 	courseList, err := r.client.GetClassList(r.config)
 	if err != nil {
 		return fmt.Errorf("获取课程列表失败: %w", err)
@@ -255,23 +418,14 @@ func (r *Robber) robCourse(workerID int) error {
 			continue
 		}
 
-		// do_jxb_id 优先从 Robber 级别的缓存中取，避免每轮重建 Course 对象后缓存失效
-		r.extraMu.RLock()
-		extra, cached := r.extraCache[course.ID]
-		r.extraMu.RUnlock()
-
-		if !cached {
-			var fetchErr error
-			extra, fetchErr = r.client.GetClassInfo(course.ID)
-			if fetchErr != nil {
-				r.logger.Warn(fmt.Sprintf("获取课程详情失败: %s - %v", course.Name, fetchErr))
+		if course.Extra == nil {
+			extra, err := r.client.GetClassInfo(course.ID)
+			if err != nil {
+				r.logger.Warn(fmt.Sprintf("获取课程详情失败: %s - %v", course.Name, err))
 				continue
 			}
-			r.extraMu.Lock()
-			r.extraCache[course.ID] = extra
-			r.extraMu.Unlock()
+			course.Extra = extra
 		}
-		course.Extra = extra
 
 		r.logger.Info(fmt.Sprintf("Worker %d 尝试选课: %s (%s)", workerID, course.Name, course.Teacher))
 		if err := r.client.SelectCourse(course); err != nil {
@@ -283,7 +437,7 @@ func (r *Robber) robCourse(workerID int) error {
 		return nil
 	}
 
-	return fmt.Errorf("没有成功选到课程")
+	return fmt.Errorf("本轮未能成功选到课程")
 }
 
 // filterCourses 筛选符合配置条件的课程
@@ -297,18 +451,74 @@ func (r *Robber) filterCourses(courseList *model.CourseList) []*model.Course {
 	return matched
 }
 
-// isRateLimited 判断错误信息是否为服务端限流信号
-func isRateLimited(msg string) bool {
+// ─────────────────────────────────────────────────────────────────────────────
+// 重新登录
+// ─────────────────────────────────────────────────────────────────────────────
+
+// tryRelogin 尝试重新登录（带指数退避）
+func (r *Robber) tryRelogin(ctx context.Context, attempt int) error {
+	// 重登前等待一下，防止连续快速重登被检测
+	waitSec := attempt * 2
+	r.logger.Info(fmt.Sprintf("等待 %ds 后重新登录...", waitSec))
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("任务已取消")
+	case <-time.After(time.Duration(waitSec) * time.Second):
+	}
+
+	if err := r.client.Login(r.config); err != nil {
+		return fmt.Errorf("重新登录失败: %w", err)
+	}
+
+	// 重置熔断器（重新登录后熔断器也应该复位）
+	r.client.CircuitBreaker().Reset()
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 错误分类辅助
+// ─────────────────────────────────────────────────────────────────────────────
+
+// isBannedError 判断是否为账号封禁错误
+func isBannedError(msg string) bool {
 	lower := strings.ToLower(msg)
-	for _, kw := range []string{"429", "503", "频繁", "限流", "too many", "rate limit", "slow down"} {
-		if strings.Contains(lower, kw) {
+	for _, kw := range []string{"风控-停止", "账号已被封禁", "账号锁定", "账号封禁", "暂停使用"} {
+		if strings.Contains(lower, strings.ToLower(kw)) {
 			return true
 		}
 	}
 	return false
 }
 
-// IsRunning 返回当前是否正在运行
-func (r *Robber) IsRunning() bool {
-	return atomic.LoadInt32(&r.running) == 1
+// isSessionError 判断是否为 Session 失效错误
+func isSessionError(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, kw := range []string{"风控-会话", "session", "重新登录", "登录超时", "会话"} {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRateLimitError 判断是否为限流错误
+func isRateLimitError(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, kw := range []string{"风控-限流", "429", "503", "频繁", "限流", "too many", "rate limit", "slow down"} {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 辅助函数
+// ─────────────────────────────────────────────────────────────────────────────
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

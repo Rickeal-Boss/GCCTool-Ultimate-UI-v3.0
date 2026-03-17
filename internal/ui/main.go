@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -15,6 +16,7 @@ import (
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/client"
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/robber"
+	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/stealth"
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/pkg/logger"
 )
 
@@ -49,6 +51,12 @@ func NewApp() *App {
 	a.initClient()
 	a.initRobber()
 	a.buildUI()
+
+	// 自动加载上次保存的配置（若存在）
+	a.loadSavedConfig()
+
+	// 启动遥测摘要定时刷新（每 30s 输出一次到日志）
+	go a.startTelemetryLoop()
 
 	return a
 }
@@ -229,7 +237,7 @@ func (a *App) buildAuthCard() fyne.CanvasObject {
 
 func (a *App) buildNodeCard() fyne.CanvasObject {
 	// 节点选择 + 节点说明提示
-	nodeHint := canvas.NewText("节点1-5 HTTPS 校外可用；节点6-13 HTTP 仅校内可用", mdDisabled)
+	nodeHint := canvas.NewText("节点1-5 HTTPS 校外可用；节点6-13 HTTP 仅校内可用", mdForegroundSub)
 	nodeHint.TextSize = 11
 
 	content := container.NewVBox(
@@ -250,7 +258,7 @@ func (a *App) buildTimeCard() fyne.CanvasObject {
 	threadRow := container.NewHBox(a.ui.ThreadEntry, widget.NewLabel("个"))
 
 	// 线程数提示
-	threadHint := canvas.NewText("建议 5~15，过高会触发服务端限流", mdDisabled)
+	threadHint := canvas.NewText("建议 5~15，过高会触发服务端限流", mdForegroundSub)
 	threadHint.TextSize = 11
 
 	content := container.NewVBox(
@@ -294,8 +302,9 @@ func (a *App) buildFilterCard() fyne.CanvasObject {
 // buildButtonBar 底部液态玻璃操作栏
 // statusLabel 由 a.statusLabel 持有，可在运行时动态更新
 func (a *App) buildButtonBar() fyne.CanvasObject {
-	a.statusLabel = canvas.NewText("● 就绪", color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xCC})
-	a.statusLabel.TextSize = 12
+	// 就绪状态：浅蓝白色（柔和、清晰）
+	a.statusLabel = canvas.NewText("● 就绪", color.NRGBA{R: 0xC8, G: 0xD8, B: 0xFF, A: 0xFF})
+	a.statusLabel.TextSize = 13
 
 	return buildDynamicButtonBar(a.startLiquid, a.stopLiquid, a.copyLiquid, a.statusLabel)
 }
@@ -340,20 +349,38 @@ func (a *App) onStartClicked() {
 }
 
 func (a *App) doStartRobbery(cfg *model.Config) {
+	// 自动保存配置（启动时保存，程序崩溃也不会丢失配置）
+	if err := model.SaveConfig(cfg); err != nil {
+		a.logger.Warn(fmt.Sprintf("配置保存失败（不影响运行）: %v", err))
+	} else {
+		a.logger.Info("配置已自动保存")
+	}
+
+	// 重置遥测计数器
+	stealth.Global.Reset()
+
 	// 禁用所有输入，切换按钮状态
 	disableInputs(a.ui, true)
 	a.stopLiquid.Enable()
 	a.startLiquid.Disable()
 
-	// 更新状态芯片
-	a.setStatus("● 登录中...", color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF})
+	// 更新状态芯片：登录中 → 温暖 Amber 闪烁感
+	a.setStatus("● 登录中...", color.NRGBA{R: 0xFF, G: 0xD0, B: 0x40, A: 0xFF})
 
 	a.logger.Clear()
 	a.logger.Info("开始抢课任务...")
 
 	go func() {
-		// panic 恢复放在最外层（defer LIFO，最后注册的最先执行）
 		defer func() {
+			// 密码原地清零（防止堆栈/内存残留）
+			if len(cfg.Password) > 0 {
+				b := []byte(cfg.Password)
+				for i := range b {
+					b[i] = 0
+				}
+				cfg.Password = ""
+			}
+
 			if r := recover(); r != nil {
 				a.logger.Error(fmt.Sprintf("抢课任务异常: %v", r))
 				a.resetUIAfterStop()
@@ -365,27 +392,19 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 		a.robber = robber.NewRobber(a.client, a.logger)
 
 		if err := a.robber.Start(cfg); err != nil {
-			// 登录失败：立即清零密码，UI 恢复
-			zeroPassword(cfg)
 			a.logger.Error(fmt.Sprintf("启动失败: %v", err))
 			a.resetUIAfterStop()
 			return
 		}
 
-		// 登录成功：密码已完成 RSA 加密并提交，原文不再需要，立即清零
-		// 必须在 Start() 返回后同步执行，不能放 defer（defer 要等整个 goroutine 退出才执行）
-		zeroPassword(cfg)
-
-		// Start() 登录成功后立即返回，更新状态为"抢课中"
-		a.setStatus("● 抢课中", color.NRGBA{R: 0x43, G: 0xA0, B: 0x47, A: 0xFF})
+		// Start() 登录成功后立即返回，更新状态为"抢课中"（亮绿）
+		a.setStatus("● 抢课中", color.NRGBA{R: 0x4A, G: 0xDE, B: 0x80, A: 0xFF})
 	}()
 }
 
 func (a *App) onStopClicked() {
 	a.logger.Info("正在停止抢课...")
-	if a.robber != nil {
-		a.robber.Stop()
-	}
+	a.robber.Stop()
 	a.resetUIAfterStop()
 }
 
@@ -394,7 +413,8 @@ func (a *App) resetUIAfterStop() {
 	disableInputs(a.ui, false)
 	a.stopLiquid.Disable()
 	a.startLiquid.Enable()
-	a.setStatus("● 已停止", color.NRGBA{R: 0xE5, G: 0x39, B: 0x35, A: 0xFF})
+	// 已停止：亮红色，清晰辨识
+	a.setStatus("● 已停止", color.NRGBA{R: 0xFF, G: 0x6B, B: 0x6B, A: 0xFF})
 }
 
 // setStatus 更新底部状态芯片文字和颜色
@@ -408,14 +428,67 @@ func (a *App) setStatus(text string, col color.NRGBA) {
 }
 
 // Run 启动应用主循环
-//
-// ShowAndRun 是阻塞调用，窗口关闭后返回。
-// 返回后立即关闭 Logger，停止后台 processLogs goroutine，防止 goroutine 泄漏。
 func (a *App) Run() {
 	a.window.ShowAndRun()
-	// 程序退出：关闭 logger（停止 processLogs goroutine）
-	if a.logger != nil {
-		a.logger.Close()
+}
+
+// loadSavedConfig 从本地文件加载上次保存的配置并填充 UI
+func (a *App) loadSavedConfig() {
+	if !model.ConfigExists() {
+		return
+	}
+	cfg, err := model.LoadConfig()
+	if err != nil {
+		a.logger.Warn(fmt.Sprintf("加载历史配置失败: %v", err))
+		return
+	}
+	// 填充 UI 字段
+	if cfg.Username != "" {
+		a.ui.UsernameEntry.SetText(cfg.Username)
+	}
+	if cfg.Password != "" {
+		a.ui.PasswordEntry.SetText(cfg.Password)
+	}
+	if cfg.NodeURL != "" {
+		a.ui.NodeSelect.SetSelected(cfg.NodeURL)
+	}
+	if cfg.Agent != "" {
+		a.ui.AgentEntry.SetText(cfg.Agent)
+	}
+	a.ui.HourEntry.SetText(fmt.Sprintf("%d", cfg.Hour))
+	a.ui.MinuteEntry.SetText(fmt.Sprintf("%d", cfg.Minute))
+	a.ui.AdvanceEntry.SetText(fmt.Sprintf("%d", cfg.Advance))
+	a.ui.ThreadEntry.SetText(fmt.Sprintf("%d", cfg.Threads))
+	a.ui.MinCreditEntry.SetText(fmt.Sprintf("%d", cfg.MinCredit))
+	if cfg.CourseName != "" {
+		a.ui.CourseNameEntry.SetText(cfg.CourseName)
+	}
+	if cfg.TeacherName != "" {
+		a.ui.TeacherEntry.SetText(cfg.TeacherName)
+	}
+	if cfg.CourseNumber != "" {
+		a.ui.CourseNumEntry.SetText(cfg.CourseNumber)
+	}
+	a.logger.Info("✓ 已加载上次保存的配置")
+}
+
+// startTelemetryLoop 定期将遥测摘要和策略建议输出到日志（每 30s 一次）
+//
+// 仅在抢课运行期间输出（检测 robber.IsRunning()），避免空闲时刷屏。
+func (a *App) startTelemetryLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if a.robber == nil || !a.robber.IsRunning() {
+			continue
+		}
+		// 输出遥测摘要
+		a.logger.Info(stealth.Global.Summary())
+		// 输出策略建议
+		advices := stealth.Global.Analyze()
+		if len(advices) > 0 {
+			a.logger.Warn(stealth.FormatAdvices(advices))
+		}
 	}
 }
 
@@ -460,9 +533,6 @@ func disableInputs(ui *model.UIComponents, disabled bool) {
 	}
 
 	for _, check := range ui.CategoryChecks {
-		if check == nil {
-			continue
-		}
 		if disabled {
 			check.Disable()
 		} else {
@@ -471,41 +541,55 @@ func disableInputs(ui *model.UIComponents, disabled bool) {
 	}
 }
 
-// zeroPassword 将 Config 中的密码字段原地清零，防止明文密码在内存中残留。
+// buildDynamicButtonBar 动态底部操作栏（statusLabel 外部持有，可运行时更新）
 //
-// Go 字符串是不可变的，这里先转为 []byte 逐字节清零，再赋空字符串，
-// 确保堆上的字节数组被清零（GC 回收前不会被读取）。
-func zeroPassword(cfg *model.Config) {
-	if len(cfg.Password) > 0 {
-		b := []byte(cfg.Password)
-		for i := range b {
-			b[i] = 0
-		}
-		cfg.Password = ""
-	}
-}
-
-// buildDynamicButtonBar 动态底部栏（statusLabel 外部持有，可运行时更新）
+// 视觉层次（底→顶）：
+//  1. barBg       — 深色半透明背景（Ink 深蓝）
+//  2. topGlow     — 顶部 Amber 高光线（2px，液态玻璃上边缘反光）
+//  3. topGlow2    — 顶部白色次级高光（1px，更柔和）
+//  4. foreground  — 按钮行 + 状态芯片
 func buildDynamicButtonBar(startBtn, stopBtn, copyBtn fyne.CanvasObject, statusLbl *canvas.Text) fyne.CanvasObject {
-	barBg := canvas.NewRectangle(color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xEC})
+	// 背景：深色半透明，与暖黄主界面形成强烈对比
+	barBg := canvas.NewRectangle(color.NRGBA{R: 0x1A, G: 0x1A, B: 0x2E, A: 0xEE})
 
-	topGlow := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x88})
+	// Amber 顶部高光线（主色调呼应）
+	topGlow := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0x99})
 	topGlow.SetMinSize(fyne.NewSize(0, 2))
 
-	// 状态芯片背景
-	chipBg := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x18})
-	chipBg.CornerRadius = 14
-	chipBg.StrokeColor = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x44}
+	// 白色次级高光线（更柔和的玻璃质感）
+	topGlow2 := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x1A})
+	topGlow2.SetMinSize(fyne.NewSize(0, 1))
+
+	// 状态芯片：精致玻璃胶囊设计
+	// 外层：圆角矩形 + 低透明度填充 + 半透明描边
+	chipBg := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x16})
+	chipBg.CornerRadius = 18
+	chipBg.StrokeColor = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x50}
 	chipBg.StrokeWidth = 1
 
-	statusChip := container.NewPadded(container.NewStack(chipBg, container.NewPadded(statusLbl)))
+	// 内部高光层（模拟玻璃折射）
+	chipShim := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x1A})
+	chipShim.CornerRadius = 18
 
+	// 文字字号稍大，更易读
+	statusLbl.TextSize = 13
+
+	statusChip := container.NewPadded(
+		container.NewStack(chipBg, chipShim, container.NewPadded(statusLbl)),
+	)
+
+	// 按钮间分隔线
 	sep := canvas.NewRectangle(color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x28})
-	sep.SetMinSize(fyne.NewSize(1, 26))
+	sep.SetMinSize(fyne.NewSize(1, 28))
 
 	buttons := container.NewHBox(startBtn, stopBtn, sep, copyBtn)
 	row := container.NewBorder(nil, nil, nil, statusChip, buttons)
-	foreground := container.NewVBox(topGlow, container.NewPadded(row))
+
+	foreground := container.NewVBox(
+		topGlow,
+		topGlow2,
+		container.NewPadded(row),
+	)
 
 	return container.NewStack(barBg, foreground)
 }
