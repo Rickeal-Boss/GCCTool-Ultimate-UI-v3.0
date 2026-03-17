@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 
