@@ -14,6 +14,7 @@ package stealth
 
 import (
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 )
