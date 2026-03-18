@@ -72,7 +72,7 @@ func NewApp() *App {
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 
 func (a *App) initWindow() {
-	a.window = a.app.NewWindow("GCC 课程选课助手  V3.0")
+	a.window = a.app.NewWindow("GCC 课程选课助手  V3.1")
 	// 960×700：横向更宽，Tab 内字段行有足够空间展开
 	a.window.Resize(fyne.NewSize(960, 700))
 	a.window.SetFixedSize(false)

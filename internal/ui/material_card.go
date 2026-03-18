@@ -227,7 +227,7 @@ func buildTitleBanner() fyne.CanvasObject {
 	bottomLine.SetMinSize(fyne.NewSize(0, 3))
 
 	// ── 主标题文字 ────────────────────────────────────────────────────────
-	title := canvas.NewText("GCC 课程选课助手  V3.0", color.White)
+	title := canvas.NewText("GCC 课程选课助手  V3.1", color.White)
 	title.TextSize = 18
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	title.Alignment = fyne.TextAlignCenter
