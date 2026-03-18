@@ -412,15 +412,25 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 
 func (a *App) onStopClicked() {
 	a.logger.Info("正在停止抢课...")
-	a.robber.Stop()
+	// Anti-Fix-Bug: 添加 nil 检查，防止崩溃
+	if a.robber != nil {
+		a.robber.Stop()
+	}
 	a.resetUIAfterStop()
 }
 
 // resetUIAfterStop 停止后恢复 UI 状态
 func (a *App) resetUIAfterStop() {
-	disableInputs(a.ui, false)
-	a.stopLiquid.Disable()
-	a.startLiquid.Enable()
+	// Anti-Fix-Bug: 添加 nil 检查
+	if a.ui != nil {
+		disableInputs(a.ui, false)
+	}
+	if a.stopLiquid != nil {
+		a.stopLiquid.Disable()
+	}
+	if a.startLiquid != nil {
+		a.startLiquid.Enable()
+	}
 	// 已停止：亮红色，清晰辨识
 	a.setStatus("● 已停止", color.NRGBA{R: 0xFF, G: 0x6B, B: 0x6B, A: 0xFF})
 }
