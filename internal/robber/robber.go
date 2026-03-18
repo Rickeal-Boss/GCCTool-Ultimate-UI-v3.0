@@ -59,6 +59,7 @@ const (
 //  3. 人性化请求节奏：距开抢时间 <30s 切换激进模式，其余时间使用随机化延迟
 //  4. Session 保活：等待期间每 4 分钟轻量 GET 一次，防止 Session 超时
 //  5. 详细的风控告警日志：用户可以看到实时的反检测状态
+//  6. 课程信息保存：抢课失败时保存已获取的课程信息，供用户手动接管
 type Robber struct {
 	client *client.Client
 	logger *logger.Logger
@@ -73,6 +74,10 @@ type Robber struct {
 	failCount    int
 	reloginCount int
 	mu           sync.Mutex
+
+	// 课程信息保存（用于手动接管）
+	lastCourseList *model.CourseList
+	lastMatched    []*model.Course
 }
 
 // NewRobber 创建抢课调度器
@@ -387,12 +392,16 @@ func (r *Robber) worker(ctx context.Context, id int) {
 
 			if reloginAttempts > maxReLoginAttempts {
 				r.logger.Error(fmt.Sprintf("Worker %d Session 失效，重新登录已达上限 %d 次，停止此 Worker", id, maxReLoginAttempts))
+				// 输出已获取的课程信息，供用户手动接管
+				r.logCourseInfoForManualTakeover()
 				return
 			}
 
 			r.logger.Warn(fmt.Sprintf("Worker %d Session 失效，正在重新登录（第 %d/%d 次）...", id, reloginAttempts, maxReLoginAttempts))
 			if loginErr := r.tryRelogin(ctx, reloginAttempts); loginErr != nil {
 				r.logger.Error(fmt.Sprintf("Worker %d 重新登录失败: %v", id, loginErr))
+				// 输出已获取的课程信息，供用户手动接管
+				r.logCourseInfoForManualTakeover()
 				// 短暂等待后再试
 				select {
 				case <-ctx.Done():
@@ -444,10 +453,20 @@ func (r *Robber) robCourse(workerID int) error {
 		return fmt.Errorf("获取课程列表失败: %w", err)
 	}
 
+	// 保存课程列表供手动接管使用
+	r.mu.Lock()
+	r.lastCourseList = courseList
+	r.mu.Unlock()
+
 	matched := r.filterCourses(courseList)
 	if len(matched) == 0 {
 		return fmt.Errorf("没有符合条件的课程")
 	}
+
+	// 保存匹配的课程列表
+	r.mu.Lock()
+	r.lastMatched = matched
+	r.mu.Unlock()
 
 	for _, course := range matched {
 		if course.IsFull() {
@@ -475,6 +494,20 @@ func (r *Robber) robCourse(workerID int) error {
 	}
 
 	return fmt.Errorf("本轮未能成功选到课程")
+}
+
+// GetLastCourseList 获取最后一次获取的课程列表（用于手动接管）
+func (r *Robber) GetLastCourseList() *model.CourseList {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastCourseList
+}
+
+// GetLastMatchedCourses 获取最后一次匹配的课程列表（用于手动接管）
+func (r *Robber) GetLastMatchedCourses() []*model.Course {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastMatched
 }
 
 // filterCourses 筛选符合配置条件的课程
@@ -563,4 +596,56 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// logCourseInfoForManualTakeover 输出课程信息供用户手动接管
+func (r *Robber) logCourseInfoForManualTakeover() {
+	r.mu.Lock()
+	matched := r.lastMatched
+	list := r.lastCourseList
+	r.mu.Unlock()
+
+	r.logger.Info("═══════════════════════════════════════════════════")
+	r.logger.Info("📋 已获取的课程信息（可手动接管选课）")
+	r.logger.Info("═══════════════════════════════════════════════════")
+
+	if len(matched) > 0 {
+		r.logger.Info(fmt.Sprintf("✓ 匹配条件的课程: %d 门", len(matched)))
+		for i, course := range matched {
+			if i >= 10 { // 最多显示10门
+				r.logger.Info(fmt.Sprintf("  ... 还有 %d 门课程", len(matched)-10))
+				break
+			}
+			capacityInfo := "未知容量"
+			if course.Capacity > 0 {
+				capacityInfo = fmt.Sprintf("%d/%d", course.Selected, course.Capacity)
+			}
+			r.logger.Info(fmt.Sprintf("  %d. %s | 教师:%s | 学分:%d | 容量:%s | 时间:%s",
+				i+1, course.Name, course.Teacher, course.Credit, capacityInfo, course.WeekTime))
+		}
+	} else if list != nil && len(list.Items) > 0 {
+		r.logger.Info(fmt.Sprintf("✓ 获取到的全部课程: %d 门", len(list.Items)))
+		for i, course := range list.Items {
+			if i >= 5 { // 最多显示5门
+				r.logger.Info(fmt.Sprintf("  ... 还有 %d 门课程", len(list.Items)-5))
+				break
+			}
+			capacityInfo := "未知容量"
+			if course.Capacity > 0 {
+				capacityInfo = fmt.Sprintf("%d/%d", course.Selected, course.Capacity)
+			}
+			r.logger.Info(fmt.Sprintf("  %d. %s | 教师:%s | 学分:%d | 容量:%s",
+				i+1, course.Name, course.Teacher, course.Credit, capacityInfo))
+		}
+	} else {
+		r.logger.Info("⚠ 暂无课程数据")
+	}
+
+	r.logger.Info("───────────────────────────────────────────────────")
+	r.logger.Info("📖 手动选课步骤：")
+	r.logger.Info("   1. 访问: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
+	r.logger.Info("   2. 登录教务系统")
+	r.logger.Info("   3. 切换到软件的【课程列表】标签页查看详情")
+	r.logger.Info("   4. 根据课程信息在教务系统中搜索并选课")
+	r.logger.Info("═══════════════════════════════════════════════════")
 }
