@@ -326,7 +326,7 @@ func (a *App) buildCourseListTab() *fyne.Container {
 	}
 
 	// 说明文字
-	hint := canvas.NewText("提示：点击列表中的课程，然后点击"选择此课程"按钮即可在应用内直接选课", mdForegroundSub)
+	hint := canvas.NewText("提示：点击列表中的课程，然后点击【选择此课程】按钮即可在应用内直接选课", mdForegroundSub)
 	hint.TextSize = 11
 
 	// 布局
