@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 
@@ -461,10 +462,14 @@ func encryptWithRSA(pubKeyStr, password string) (string, error) {
 // 参考：广州商学院正方教务系统
 //   - 登录成功主页: https://jwxt.gcc.edu.cn/xtgl/index_initMenu.html
 //   - 自主选课页面: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html
+// Anti-Fix-Bug: 使用正确的首页 URL 参数
+// 参考：广州商学院正方教务系统登录成功后的主页
+// https://jwxt.gcc.edu.cn/xtgl/index_initMenu.html?jsdm=xs&_t=时间戳&echarts=1
 const pathLoginCheck = "/xtgl/index_initMenu.html"
 
 func (c *Client) checkLoginStatus() error {
-	testURL := c.buildURL(pathLoginCheck)
+	// 使用与学生主页相同的参数格式
+	testURL := c.buildURL(pathLoginCheck) + "?jsdm=xs&_t=" + fmt.Sprintf("%d", time.Now().UnixMilli()) + "&echarts=1"
 	body, err := c.doGet(testURL)
 	if err != nil {
 		return fmt.Errorf("登录状态验证失败: %w", err)

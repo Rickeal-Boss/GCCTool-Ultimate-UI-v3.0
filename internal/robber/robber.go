@@ -517,9 +517,14 @@ func isBannedError(msg string) bool {
 }
 
 // isSessionError 判断是否为 Session 失效错误
+//
+// Anti-Fix-Bug: 使用更精确的关键词，避免误判
+// 问题："重新登录"太宽泛，选课未开放页面可能包含"请重新登录"
+// 解决：只检测明确的风控信号
 func isSessionError(msg string) bool {
 	lower := strings.ToLower(msg)
-	for _, kw := range []string{"风控-会话", "session", "重新登录", "登录超时", "会话"} {
+	// 只检测明确的风控信号（由 DetectRisk 生成）
+	for _, kw := range []string{"风控-会话", "session过期", "会话已过期", "登录超时"} {
 		if strings.Contains(lower, strings.ToLower(kw)) {
 			return true
 		}
