@@ -68,10 +68,13 @@ var riskRules = []struct {
 	{
 		level: RiskSessionExpired,
 		keywords: []string{
-			"login_slogin", "请重新登录", "您已超时",
+			// Anti-Fix-Bug: 移除误报关键词，只保留真正的 Session 失效提示
+			// 移除 "login_slogin"（登录页面的 URL 路径，不是 Session 失效的提示）
+			// 移除 `type="password"`（登录页面的密码输入框，不是 Session 失效的提示）
+			// 广州商学院教务系统登录页: https://jwxt.gcc.edu.cn/xtgl/login_slogin.html
+			"请重新登录", "您已超时",
 			"会话已过期", "登录超时", "重新登录",
 			"未登录", "请先登录", "loginout",
-			`type="password"`,
 		},
 		message: "Session 已失效，需要重新登录",
 	},
