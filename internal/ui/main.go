@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -194,6 +195,7 @@ func (a *App) buildMainLayout() *fyne.Container {
 	tabs := container.NewAppTabs(
 		container.NewTabItem("基础配置", a.buildConfigTab()),
 		container.NewTabItem("高级设置", a.buildAdvancedTab()),
+		container.NewTabItem("课程列表", a.buildCourseListTab()),
 		container.NewTabItem("运行日志", a.buildLogTab()),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
@@ -230,6 +232,78 @@ func (a *App) buildAdvancedTab() *fyne.Container {
 // buildLogTab 日志 Tab
 func (a *App) buildLogTab() *fyne.Container {
 	return container.NewPadded(buildLogPanel("运行日志", 6, a.ui.LogScroll))
+}
+
+// buildCourseListTab 课程列表 Tab（用于显示获取到的课程，支持手动接管）
+func (a *App) buildCourseListTab() *fyne.Container {
+	// 课程列表标题
+	title := widget.NewLabel("已获取的课程列表（抢课失败时可手动接管）")
+	title.TextStyle = fyne.TextStyle{Bold: true}
+
+	// 刷新按钮
+	refreshBtn := widget.NewButton("刷新课程列表", func() {
+		a.refreshCourseList()
+	})
+
+	// 导出按钮
+	exportBtn := widget.NewButton("导出课程信息", func() {
+		a.exportCourseInfo()
+	})
+
+	// 按钮行
+	buttonRow := container.NewHBox(refreshBtn, exportBtn)
+
+	// 课程列表（使用 List 组件）
+	a.ui.CourseList = widget.NewList(
+		func() int {
+			return len(a.ui.CourseData)
+		},
+		func() fyne.CanvasObject {
+			// 列表项模板
+			return container.NewVBox(
+				widget.NewLabel("课程名称"),
+				container.NewHBox(
+					widget.NewLabel("教师: "),
+					widget.NewLabel("时间: "),
+					widget.NewLabel("容量: "),
+				),
+			)
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			if i >= len(a.ui.CourseData) {
+				return
+			}
+			course := a.ui.CourseData[i]
+			container := o.(*fyne.Container)
+
+			// 更新课程名称
+			titleLabel := container.Objects[0].(*widget.Label)
+			titleLabel.SetText(fmt.Sprintf("%s (%s学分)", course.Name, formatCredit(course.Credit)))
+
+			// 更新详细信息
+			detailBox := container.Objects[1].(*fyne.Container)
+			teacherLabel := detailBox.Objects[0].(*widget.Label)
+			timeLabel := detailBox.Objects[1].(*widget.Label)
+			capacityLabel := detailBox.Objects[2].(*widget.Label)
+
+			teacherLabel.SetText(fmt.Sprintf("教师: %s", course.Teacher))
+			timeLabel.SetText(fmt.Sprintf("时间: %s", course.WeekTime))
+			capacityLabel.SetText(fmt.Sprintf("容量: %d/%d", course.Selected, course.Capacity))
+		},
+	)
+
+	// 说明文字
+	hint := canvas.NewText("提示：当自动抢课因Session失效等原因失败时，可在此查看已获取的课程信息，手动前往教务系统选课", mdForegroundSub)
+	hint.TextSize = 11
+
+	// 布局
+	content := container.NewBorder(
+		container.NewVBox(title, buttonRow, hint),
+		nil, nil, nil,
+		a.ui.CourseList,
+	)
+
+	return container.NewPadded(content)
 }
 
 // ── 卡片构建 ──────────────────────────────────────────────────────────────────
@@ -443,6 +517,77 @@ func (a *App) setStatus(text string, col color.NRGBA) {
 	a.statusLabel.Text = text
 	a.statusLabel.Color = col
 	a.statusLabel.Refresh()
+}
+
+// refreshCourseList 刷新课程列表显示
+func (a *App) refreshCourseList() {
+	if a.robber == nil {
+		dialog.ShowInformation("提示", "请先启动抢课任务以获取课程列表", a.window)
+		return
+	}
+
+	courses := a.robber.GetLastMatchedCourses()
+	if courses == nil || len(courses) == 0 {
+		// 尝试获取全部课程列表
+		list := a.robber.GetLastCourseList()
+		if list != nil && len(list.Items) > 0 {
+			a.ui.CourseData = list.Items
+			a.ui.CourseList.Refresh()
+			dialog.ShowInformation("提示", fmt.Sprintf("已加载 %d 门课程", len(list.Items)), a.window)
+		} else {
+			dialog.ShowInformation("提示", "暂无课程数据，请等待抢课任务获取课程列表", a.window)
+		}
+		return
+	}
+
+	a.ui.CourseData = courses
+	a.ui.CourseList.Refresh()
+	dialog.ShowInformation("提示", fmt.Sprintf("已加载 %d 门匹配的课程", len(courses)), a.window)
+}
+
+// exportCourseInfo 导出课程信息到剪贴板
+func (a *App) exportCourseInfo() {
+	if len(a.ui.CourseData) == 0 {
+		dialog.ShowInformation("提示", "暂无课程数据可导出", a.window)
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("=== GCC课程选课助手 - 课程信息导出 ===\n")
+	sb.WriteString(fmt.Sprintf("导出时间: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+	sb.WriteString(fmt.Sprintf("课程数量: %d\n\n", len(a.ui.CourseData)))
+
+	for i, course := range a.ui.CourseData {
+		sb.WriteString(fmt.Sprintf("【%d】%s\n", i+1, course.Name))
+		sb.WriteString(fmt.Sprintf("  课程编号: %s\n", course.Number))
+		sb.WriteString(fmt.Sprintf("  教师: %s\n", course.Teacher))
+		sb.WriteString(fmt.Sprintf("  学分: %d\n", course.Credit))
+		sb.WriteString(fmt.Sprintf("  上课时间: %s\n", course.WeekTime))
+		sb.WriteString(fmt.Sprintf("  上课地点: %s\n", course.Room))
+		sb.WriteString(fmt.Sprintf("  容量: %d/%d\n", course.Selected, course.Capacity))
+		if course.Extra != nil && course.Extra.DoJxbID != "" {
+			sb.WriteString(fmt.Sprintf("  教学班ID: %s\n", course.Extra.DoJxbID))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("=== 手动选课指引 ===\n")
+	sb.WriteString("1. 访问: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html?gnmkdm=N253512&layout=default\n")
+	sb.WriteString("2. 登录教务系统\n")
+	sb.WriteString("3. 根据上述课程信息搜索并选择课程\n")
+	sb.WriteString("4. 点击选课按钮完成选课\n")
+
+	// 复制到剪贴板
+	a.window.Clipboard().SetContent(sb.String())
+	dialog.ShowInformation("导出成功", "课程信息已复制到剪贴板，可直接粘贴到记事本保存", a.window)
+}
+
+// formatCredit 格式化学分显示
+func formatCredit(credit int) string {
+	if credit == 0 {
+		return "未知"
+	}
+	return fmt.Sprintf("%d", credit)
 }
 
 // Run 启动应用主循环
