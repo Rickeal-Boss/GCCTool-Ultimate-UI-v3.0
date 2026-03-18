@@ -320,7 +320,7 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	bodyStr := string(body)
 
 	// 风控信号检测
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
@@ -429,7 +429,7 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	bodyStr := string(body)
 
 	// 风控信号检测
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
@@ -547,7 +547,7 @@ func (c *Client) doPostWithReferer(rawURL string, data map[string]string, refere
 	bodyStr := string(body)
 
 	// 风控信号检测
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
