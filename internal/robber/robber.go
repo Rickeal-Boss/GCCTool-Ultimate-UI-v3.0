@@ -146,6 +146,11 @@ func (r *Robber) Start(cfg *model.Config) error {
 
 // Stop 停止抢课
 func (r *Robber) Stop() {
+	// Anti-Fix-Bug: 添加 nil 检查，防止崩溃
+	if r == nil {
+		return
+	}
+
 	r.mu.Lock()
 	if !r.running {
 		r.mu.Unlock()
@@ -166,9 +171,15 @@ func (r *Robber) Stop() {
 	sc, fc, rc := r.successCount, r.failCount, r.reloginCount
 	r.mu.Unlock()
 
+	// Anti-Fix-Bug: 添加 nil 检查
+	cbState := "未知"
+	if r.client != nil && r.client.CircuitBreaker() != nil {
+		cbState = r.client.CircuitBreaker().StateName()
+	}
+
 	r.logger.Info(fmt.Sprintf(
 		"抢课已停止 | 成功: %d | 失败: %d | 重新登录: %d | 熔断器: %s",
-		sc, fc, rc, r.client.CircuitBreaker().StateName(),
+		sc, fc, rc, cbState,
 	))
 }
 
