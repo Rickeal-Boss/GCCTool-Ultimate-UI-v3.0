@@ -48,11 +48,6 @@ func NewLogger(ui *model.UIComponents) *Logger {
 
 // Close 关闭日志器
 func (l *Logger) Close() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.running {
-		return
-	}
 	l.running = false
 	close(l.logChan)
 }
@@ -139,26 +134,18 @@ func (l *Logger) Success(message string) {
 }
 
 // log 记录日志
-//
-// Bug Fix（敏感信息过滤）：
-// 所有日志消息在写入队列前，先经过 sanitizeLog() 脱敏处理，
-// 防止密码、学号、Token 等敏感信息出现在 UI 日志或终端输出中。
 func (l *Logger) log(level LogLevel, message string) {
-	l.mu.Lock()
-	running := l.running
-	l.mu.Unlock()
-
-	if !running {
+	if !l.running {
 		return
 	}
 
-	// 敏感信息脱敏：写入 UI/终端前过滤密码、学号、Token 等字段
-	safeMessage := sanitizeLog(message)
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	select {
 	case l.logChan <- logMessage{
 		level:   level,
-		message: safeMessage,
+		message: message,
 		time:    time.Now(),
 	}:
 	default:
