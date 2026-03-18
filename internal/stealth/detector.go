@@ -81,10 +81,12 @@ var riskRules = []struct {
 	{
 		level: RiskRateLimit,
 		keywords: []string{
+			// Anti-Fix-Bug: 移除 "稍后再试"、"稍后重试" 等过于敏感的关键词
+			// 这些词可能出现在普通的登录失败提示、帮助信息中，导致误判
+			// 只保留明确的频率限制提示
 			"429", "操作频繁", "请求频繁", "频繁操作",
-			"稍后再试", "稍后重试", "too many requests",
-			"rate limit", "slow down", "限流",
-			"请勿频繁", "操作过于频繁",
+			"too many requests", "rate limit", "slow down", "限流",
+			"请勿频繁", "操作过于频繁", "访问过于频繁",
 		},
 		message: "触发频率限制，将进行退避等待",
 	},
