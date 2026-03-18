@@ -234,10 +234,10 @@ func (a *App) buildLogTab() *fyne.Container {
 	return container.NewPadded(buildLogPanel("运行日志", 6, a.ui.LogScroll))
 }
 
-// buildCourseListTab 课程列表 Tab（用于显示获取到的课程，支持手动接管）
+// buildCourseListTab 课程列表 Tab（用于显示获取到的课程，支持应用内直接选课）
 func (a *App) buildCourseListTab() *fyne.Container {
 	// 课程列表标题
-	title := widget.NewLabel("已获取的课程列表（抢课失败时可手动接管）")
+	title := widget.NewLabel("已获取的课程列表（点击课程可直接选课）")
 	title.TextStyle = fyne.TextStyle{Bold: true}
 
 	// 刷新按钮
@@ -252,6 +252,18 @@ func (a *App) buildCourseListTab() *fyne.Container {
 
 	// 按钮行
 	buttonRow := container.NewHBox(refreshBtn, exportBtn)
+
+	// 选中的课程索引
+	var selectedIndex int = -1
+
+	// 选课按钮（初始禁用）
+	selectBtn := widget.NewButton("选 择 此 课 程", func() {
+		if selectedIndex >= 0 && selectedIndex < len(a.ui.CourseData) {
+			a.manualSelectCourse(a.ui.CourseData[selectedIndex])
+		}
+	})
+	selectBtn.Importance = widget.HighImportance
+	selectBtn.Disable()
 
 	// 课程列表（使用 List 组件）
 	a.ui.CourseList = widget.NewList(
@@ -292,14 +304,36 @@ func (a *App) buildCourseListTab() *fyne.Container {
 		},
 	)
 
+	// 列表选择事件
+	a.ui.CourseList.OnSelected = func(id widget.ListItemID) {
+		selectedIndex = id
+		if id >= 0 && id < len(a.ui.CourseData) {
+			course := a.ui.CourseData[id]
+			if course.IsFull() {
+				selectBtn.SetText("课程已满")
+				selectBtn.Disable()
+			} else {
+				selectBtn.SetText(fmt.Sprintf("选择: %s", course.Name))
+				selectBtn.Enable()
+			}
+		}
+	}
+
+	a.ui.CourseList.OnUnselected = func(id widget.ListItemID) {
+		selectedIndex = -1
+		selectBtn.SetText("选 择 此 课 程")
+		selectBtn.Disable()
+	}
+
 	// 说明文字
-	hint := canvas.NewText("提示：当自动抢课因Session失效等原因失败时，可在此查看已获取的课程信息，手动前往教务系统选课", mdForegroundSub)
+	hint := canvas.NewText("提示：点击列表中的课程，然后点击"选择此课程"按钮即可在应用内直接选课", mdForegroundSub)
 	hint.TextSize = 11
 
 	// 布局
 	content := container.NewBorder(
 		container.NewVBox(title, buttonRow, hint),
-		nil, nil, nil,
+		container.NewPadded(selectBtn),
+		nil, nil,
 		a.ui.CourseList,
 	)
 
@@ -588,6 +622,53 @@ func formatCredit(credit int) string {
 		return "未知"
 	}
 	return fmt.Sprintf("%d", credit)
+}
+
+// manualSelectCourse 在应用内手动选择课程
+func (a *App) manualSelectCourse(course *model.Course) {
+	if a.robber == nil {
+		dialog.ShowError(fmt.Errorf("抢课器未初始化，请先启动任务"), a.window)
+		return
+	}
+
+	// 检查课程是否已满
+	if course.IsFull() {
+		dialog.ShowInformation("提示", "该课程已满，请选择其他课程", a.window)
+		return
+	}
+
+	// 显示确认对话框
+	confirmMsg := fmt.Sprintf(
+		"确定要选择以下课程吗？\n\n"+
+			"课程: %s\n"+
+			"教师: %s\n"+
+			"学分: %d\n"+
+			"时间: %s\n"+
+			"容量: %d/%d",
+		course.Name, course.Teacher, course.Credit,
+		course.WeekTime, course.Selected, course.Capacity,
+	)
+
+	dialog.ShowConfirm("确认选课", confirmMsg, func(ok bool) {
+		if !ok {
+			return
+		}
+
+		// 在后台执行选课
+		go func() {
+			a.logger.Info(fmt.Sprintf("正在手动选课: %s (%s)...", course.Name, course.Teacher))
+
+			err := a.robber.ManualSelectCourse(course)
+			if err != nil {
+				a.logger.Error(fmt.Sprintf("手动选课失败: %v", err))
+				dialog.ShowError(fmt.Errorf("选课失败: %v", err), a.window)
+				return
+			}
+
+			a.logger.Success(fmt.Sprintf("✅ 手动选课成功: %s (%s)", course.Name, course.Teacher))
+			dialog.ShowInformation("成功", fmt.Sprintf("选课成功！\n\n课程: %s\n教师: %s", course.Name, course.Teacher), a.window)
+		}()
+	}, a.window)
 }
 
 // Run 启动应用主循环

@@ -289,22 +289,25 @@ func (r *Robber) doKeepalive(ctx context.Context) {
 func (r *Robber) startWorkers(ctx context.Context) {
 	r.logger.Info(fmt.Sprintf("🚀 并发启动 %d 个 Worker...", r.config.Threads))
 
-	var wg sync.WaitGroup
-	wg.Add(r.config.Threads)
+	// Anti-Fix-Bug: 重置 WaitGroup，确保 Stop() 可以正确等待
+	r.wg = sync.WaitGroup{}
+	r.wg.Add(r.config.Threads)
 
 	for i := 0; i < r.config.Threads; i++ {
 		go func(id int) {
-			defer wg.Done()
+			defer r.wg.Done()
 			r.worker(ctx, id)
 		}(i + 1)
 	}
 
-	wg.Wait()
+	r.wg.Wait()
 	r.logger.Info("所有 Worker 已完成")
 
 	// Speed-Opt + Anti-Fix: 抢课结束，关闭抢课模式
-	r.logger.Info("抢课结束，关闭极速模式")
-	r.client.SetRobbingMode(false)
+	// Anti-Fix-Bug: 添加 nil 检查
+	if r.client != nil {
+		r.client.SetRobbingMode(false)
+	}
 }
 
 // worker 抢课 Worker（V3.1 风控感知版）
@@ -315,7 +318,7 @@ func (r *Robber) startWorkers(ctx context.Context) {
 //  3. [风控-限流]  → 指数退避等待后重试
 //  4. 正常失败     → 短暂延迟后继续重试
 func (r *Robber) worker(ctx context.Context, id int) {
-	defer r.wg.Done()
+	// Note: r.wg.Done() 在 startWorkers 中调用，这里不需要
 
 	r.logger.Info(fmt.Sprintf("Worker %d 启动", id))
 
@@ -508,6 +511,29 @@ func (r *Robber) GetLastMatchedCourses() []*model.Course {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.lastMatched
+}
+
+// ManualSelectCourse 手动选择课程（在应用内直接选课）
+func (r *Robber) ManualSelectCourse(course *model.Course) error {
+	if r.client == nil {
+		return fmt.Errorf("客户端未初始化")
+	}
+
+	// 获取课程详情（如果需要）
+	if course.Extra == nil || course.Extra.DoJxbID == "" {
+		extra, err := r.client.GetClassInfo(course.ID)
+		if err != nil {
+			return fmt.Errorf("获取课程详情失败: %w", err)
+		}
+		course.Extra = extra
+	}
+
+	// 执行选课
+	if err := r.client.SelectCourse(course); err != nil {
+		return fmt.Errorf("选课失败: %w", err)
+	}
+
+	return nil
 }
 
 // filterCourses 筛选符合配置条件的课程
