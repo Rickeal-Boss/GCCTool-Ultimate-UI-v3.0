@@ -56,6 +56,7 @@ func getNodeURL(node string) string {
 //   - 集成熔断器（防止账号因高频请求被封禁）
 //   - 集成退避策略（触发限流时自动降速）
 //   - 请求超时从 30s 调整为 15s（快速失败，更快触发重试）
+//   - 新增抢课模式标志（极致速度 + 精准风控）
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
@@ -65,6 +66,11 @@ type Client struct {
 	circuitBreaker  *stealth.CircuitBreaker
 	backoffStrategy *stealth.BackoffStrategy
 	delayProfile    stealth.DelayProfile
+
+	// Speed-Opt + Anti-Fix: 抢课模式标志
+	// true: 抢课阶段（极速模式 + 只检测账号封禁）
+	// false: 登录/等待阶段（正常模式 + 完整风控检测）
+	isRobbing bool
 }
 
 // NewClient 创建客户端
@@ -116,6 +122,27 @@ func NewClientWithProxy(nodeURL, agentURL string) *Client {
 // SetDelayProfile 动态调整延迟档位（外部可调用，如即将开抢时切 Aggressive）
 func (c *Client) SetDelayProfile(p stealth.DelayProfile) {
 	c.delayProfile = p
+}
+
+// SetRobbingMode 设置抢课模式（极致速度 + 精准风控）
+//
+// Speed-Opt + Anti-Fix:
+//   - true: 抢课阶段（极速模式 + 只检测账号封禁）
+//   - false: 登录/等待阶段（正常模式 + 完整风控检测）
+func (c *Client) SetRobbingMode(enabled bool) {
+	c.isRobbing = enabled
+	if enabled {
+		// 抢课模式：切换到极速模式
+		c.delayProfile = stealth.DelayUltra
+	} else {
+		// 非抢课模式：恢复到正常模式
+		c.delayProfile = stealth.DelayNormal
+	}
+}
+
+// IsRobbingMode 检查是否处于抢课模式
+func (c *Client) IsRobbingMode() bool {
+	return c.isRobbing
 }
 
 // CircuitBreaker 暴露熔断器（供 robber 查询状态）
@@ -179,8 +206,9 @@ func (c *Client) doGet(rawURL string) (string, error) {
 
 	bodyStr := string(body)
 
-	// 风控信号检测
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	// Speed-Opt + Anti-Fix: 风控信号检测（抢课模式下只检测账号封禁）
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
+
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()

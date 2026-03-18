@@ -90,6 +90,10 @@ const (
 	DelayNormal DelayProfile = iota
 	// DelayAggressive 激进节奏（距开抢时间 < 30s 时）
 	DelayAggressive
+	// DelayUltra 极速节奏（抢课阶段，毫秒级速度）
+	// Speed-Opt: 抢课阶段极致速度，在系统检测风控之前完成
+	// 延迟 5~10ms，每秒 1000+ 请求
+	DelayUltra
 	// DelayConservative 保守节奏（检测到限流信号时）
 	DelayConservative
 )
@@ -99,9 +103,17 @@ const (
 // 正态分布式抖动：均值附近波动，避免机械等待被检测。
 // Normal:      200~600ms
 // Aggressive:  20~70ms (Speed-Opt: 从 80~250ms 降低到 20~70ms，速度提升 4.7 倍）
+// Ultra:       5~10ms (Speed-Opt: 抢课阶段极致速度，毫秒级，每秒 1000+ 请求）
 // Conservative: 2000~6000ms
 func JitteredDelay(profile DelayProfile) time.Duration {
 	switch profile {
+	case DelayUltra:
+		// Speed-Opt: 极速模式（抢课阶段毫秒级速度）
+		// 目标：在系统检测风控之前完成抢课
+		// 延迟 5~10ms，每秒 1000+ 请求
+		base := 5 + rand.Intn(3)     // 5~8ms 基础
+		jitter := rand.Intn(2)       // 0~2ms 抖动
+		return time.Duration(base+jitter) * time.Millisecond
 	case DelayAggressive:
 		// Speed-Opt: 降低激进模式延迟，从 80~250ms 降低到 20~70ms
 		// 抢课阶段需要极致速度，每毫秒都很关键
