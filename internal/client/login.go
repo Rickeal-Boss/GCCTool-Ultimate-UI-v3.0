@@ -454,10 +454,14 @@ func encryptWithRSA(pubKeyStr, password string) (string, error) {
 //	  3. 未登录时访问主页会被 302 重定向回登录页，doGet 跟随重定向后得到登录页 HTML
 //
 //	判断规则：
-//	  1. 如果响应中出现 "login_slogin"（登录页路径特征）→ 被重定向到登录页 → 失败
-//	  2. 如果响应中出现密码输入框（type="password"）→ 显示的是登录表单 → 失败
-//	  3. 以上两条都不满足 → Session 有效，登录成功
-const pathLoginCheck = "/xtgl/index_index.html"
+//	  1. 检测成功标志（广州商学院特有路径：index_initMenu.html, xsxk/等）
+//	  2. 同时满足多个登录页特征才认为是 Session 失效
+//	  3. 明确的 Session 过期提示
+//
+// 参考：广州商学院正方教务系统
+//   - 登录成功主页: https://jwxt.gcc.edu.cn/xtgl/index_initMenu.html
+//   - 自主选课页面: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html
+const pathLoginCheck = "/xtgl/index_initMenu.html"
 
 func (c *Client) checkLoginStatus() error {
 	testURL := c.buildURL(pathLoginCheck)
@@ -466,16 +470,80 @@ func (c *Client) checkLoginStatus() error {
 		return fmt.Errorf("登录状态验证失败: %w", err)
 	}
 
-	// 判断1：被重定向回登录页（响应 HTML 中出现登录页路径特征）
-	if strings.Contains(body, "login_slogin") {
+	// Anti-Fix-Bug: 更精确的 Session 失效检测
+	// 问题：简单的字符串匹配会误判（如错误页面包含登录链接）
+	// 解决：结合多个条件判断，并检测成功标志
+	// 参考：广州商学院正方教务系统
+	//   - 登录成功主页: https://jwxt.gcc.edu.cn/xtgl/index_initMenu.html
+	//   - 自主选课页面: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html
+
+	lowerBody := strings.ToLower(body)
+
+	// 成功标志1：URL 路径特征（广州商学院正方系统特有）
+	// index_initMenu.html 是登录成功后的主页
+	// xsxk/ 是选课系统路径
+	successPathIndicators := []string{
+		"index_initmenu",     // 主页菜单初始化
+		"xsxk",               // 选课系统路径
+		"zzxkyzb",            // 自主选课相关
+		"cxzyxk",             // 查询专业选课
+		"xtgl",               // 系统管理（已登录）
+	}
+
+	for _, indicator := range successPathIndicators {
+		if strings.Contains(lowerBody, indicator) {
+			return nil // Session 有效
+		}
+	}
+
+	// 成功标志2：页面内容特征（已登录用户才有）
+	successContentIndicators := []string{
+		"选课",             // 选课相关
+		"课程",             // 课程相关
+		"学期",             // 学期信息
+		"学年",             // 学年信息
+		"个人信息",         // 个人信息
+		"退出",             // 退出按钮/链接
+		"修改密码",         // 修改密码链接
+		"当前用户",         // 当前用户显示
+		"欢迎",             // 欢迎信息
+	}
+
+	// 如果包含成功标志，说明 Session 有效
+	for _, indicator := range successContentIndicators {
+		if strings.Contains(lowerBody, indicator) {
+			return nil // Session 有效
+		}
+	}
+
+	// 失败标志1：明确的登录页特征（不仅是包含字符串，而是完整的登录表单）
+	// 检查是否同时包含：login_slogin + 密码输入框 + 登录按钮
+	hasLoginPath := strings.Contains(lowerBody, "login_slogin")
+	hasPasswordField := strings.Contains(lowerBody, `type="password"`) || strings.Contains(lowerBody, `type='password'`)
+	hasLoginButton := strings.Contains(lowerBody, "登录") || strings.Contains(lowerBody, "login") || strings.Contains(lowerBody, "登入")
+
+	if hasLoginPath && hasPasswordField && hasLoginButton {
 		return fmt.Errorf("登录失败：被重定向到登录页，请检查账号或密码")
 	}
 
-	// 判断2：响应包含密码输入框（登录表单特有元素，主页/选课页不会有）
-	if strings.Contains(body, `type="password"`) || strings.Contains(body, `type='password'`) {
-		return fmt.Errorf("登录失败：页面返回了登录表单，请检查账号或密码")
+	// 失败标志2：明确的 Session 失效提示
+	sessionExpiredKeywords := []string{
+		"请重新登录",
+		"您已超时",
+		"会话已过期",
+		"登录超时",
+		"未登录",
+		"请先登录",
+	}
+	for _, kw := range sessionExpiredKeywords {
+		if strings.Contains(lowerBody, strings.ToLower(kw)) {
+			return fmt.Errorf("登录失败：Session 已过期，请重新登录")
+		}
 	}
 
+	// 如果没有明确的失败标志，也没有成功标志，可能是系统返回了错误页面
+	// 这种情况下不认为是 Session 失效，而是系统问题
+	// 返回 nil 让上层处理（重试机制）
 	return nil
 }
 
