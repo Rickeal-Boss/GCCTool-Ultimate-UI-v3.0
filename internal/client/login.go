@@ -205,8 +205,8 @@ func (c *Client) fetchPublicKeyFromAPI() (string, error) {
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Referer", c.buildURL(pathLoginPage))
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	// 禁用压缩：防止服务端强制 gzip 导致响应乱码（二级兜底由 readResponseBody 处理）
-	req.Header.Set("Accept-Encoding", "identity")
+	// [V3.1] 移除 Accept-Encoding: identity，使用统一的 gzip, deflate
+	// readResponseBody 会自动处理 gzip 解压缩
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -218,7 +218,7 @@ func (c *Client) fetchPublicKeyFromAPI() (string, error) {
 		return "", fmt.Errorf("公钥接口返回非预期状态码 %d（URL: %s）", resp.StatusCode, apiURL)
 	}
 
-	// 使用统一的解压函数，应对服务端忽略 Accept-Encoding: identity 强制返回 gzip 的情况
+	// 使用统一的解压函数，自动处理 gzip 响应
 	bodyBytes, err := readResponseBody(resp)
 	if err != nil {
 		return "", fmt.Errorf("读取公钥响应失败: %w", err)
