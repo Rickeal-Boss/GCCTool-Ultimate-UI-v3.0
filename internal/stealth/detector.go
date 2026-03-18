@@ -91,8 +91,11 @@ var riskRules = []struct {
 	{
 		level: RiskSystemBusy,
 		keywords: []string{
+			// Anti-Fix-Bug: 移除 "503"，HTTP 503 应该在状态码检测中处理，不应该作为响应体关键词
+			// 广州商学院教务系统可能返回包含 "503" 的错误页，但这不代表系统繁忙
+			// HTTP 503 应该通过重试机制处理，而不是触发风控
 			"系统繁忙", "服务器繁忙", "服务器忙",
-			"系统维护", "503", "service unavailable",
+			"系统维护", "service unavailable",
 			"当前访问人数过多",
 		},
 		message: "系统繁忙，短暂等待后重试",
@@ -150,7 +153,10 @@ func DetectRisk(httpStatus int, responseBody string, isRobbing bool) *RiskSignal
 	case 429:
 		return &RiskSignal{Level: RiskRateLimit, Keyword: "HTTP 429", Message: "服务端明确返回限流状态码"}
 	case 503:
-		return &RiskSignal{Level: RiskSystemBusy, Keyword: "HTTP 503", Message: "服务端过载或维护"}
+		// Anti-Fix-Bug: HTTP 503 不应该触发风控，应该通过重试机制处理
+		// 503 可能只是临时错误（网络问题、服务器重启等），不代表系统繁忙
+		// 返回 RiskNone 让上层重试机制处理
+		return &RiskSignal{Level: RiskNone, Keyword: "", Message: ""}
 	case 302, 301:
 		// 重定向通常意味着 Session 失效或被踢出
 		// doGet 已跟随重定向，此处 302 一般不直接出现
