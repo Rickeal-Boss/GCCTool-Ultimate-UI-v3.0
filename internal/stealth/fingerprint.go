@@ -125,31 +125,37 @@ func JitteredDelay(profile DelayProfile) time.Duration {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // InjectHeaders 注入浏览器请求头（随机 UA + 语言轮换）
+//
+// ⚠️ 移除了 Sec-Fetch-* 头，避免触发某些教务系统的反爬虫检测。
+// ⚠️ Accept-Encoding 只包含 gzip, deflate，不包含 br（Brotli），
+//    部分旧服务器不支持 br 并因此拒绝请求。
 func InjectHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", RandomUA())
 	req.Header.Set("Accept-Language", RandomAcceptLanguage())
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-Dest", "document")
+	// 不再注入 Sec-Fetch-* 头（Sec-Fetch-Mode/Sec-Fetch-Site/Sec-Fetch-Dest），
+	// 某些教务系统对这些头敏感，会触发风控。
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 }
 
 // InjectAJAXHeaders 注入 AJAX 风格请求头（用于 JSON 接口）
+//
+// ⚠️ 移除了 Sec-Fetch-* 头，避免触发某些教务系统的反爬虫检测。
+// ⚠️ Accept-Encoding 只包含 gzip, deflate，不包含 br（Brotli），
+//    部分旧服务器不支持 br 并因此拒绝请求。
 func InjectAJAXHeaders(req *http.Request, referer string) {
 	req.Header.Set("User-Agent", RandomUA())
 	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
 	req.Header.Set("Accept-Language", RandomAcceptLanguage())
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
+	// 不再注入 Sec-Fetch-* 头（Sec-Fetch-Mode/Sec-Fetch-Site/Sec-Fetch-Dest），
+	// 某些教务系统对这些头敏感，会触发风控。
 	if referer != "" {
 		req.Header.Set("Referer", referer)
 	}

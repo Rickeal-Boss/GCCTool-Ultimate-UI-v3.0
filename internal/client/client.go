@@ -163,6 +163,7 @@ func (c *Client) doGet(rawURL string) (string, error) {
 	// GET 请求添加 Accept（覆盖 InjectHeaders 中未设置的）
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
 
+	reqStart := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		c.circuitBreaker.RecordFailure()
@@ -183,22 +184,72 @@ func (c *Client) doGet(rawURL string) (string, error) {
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodGet,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return bodyStr, fmt.Errorf("[风控-停止] %s (触发词: %s)", signal.Message, signal.Keyword)
 	case signal.ShouldBackoff():
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodGet,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return bodyStr, fmt.Errorf("[风控-限流] %s (触发词: %s)", signal.Message, signal.Keyword)
 	case signal.ShouldReLogin():
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodGet,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodGet,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Request.URL.String())
 	}
 
 	c.circuitBreaker.RecordSuccess()
 	c.backoffStrategy.Reset() // 成功时重置退避计时器
+	stealth.Global.Record(stealth.RequestRecord{
+		Timestamp:  time.Now(),
+		URL:        rawURL,
+		Method:     http.MethodGet,
+		StatusCode: resp.StatusCode,
+		Latency:    time.Since(reqStart),
+		RiskLevel:  stealth.RiskNone,
+		Error:      "",
+		UA:         req.Header.Get("User-Agent"),
+	})
 	return bodyStr, nil
 }
 
@@ -224,6 +275,7 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", c.baseURL)
 
+	reqStart := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		c.circuitBreaker.RecordFailure()
@@ -244,16 +296,56 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return bodyStr, fmt.Errorf("[风控-停止] %s (触发词: %s)", signal.Message, signal.Keyword)
 	case signal.ShouldBackoff():
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return bodyStr, fmt.Errorf("[风控-限流] %s (触发词: %s)", signal.Message, signal.Keyword)
 	case signal.ShouldReLogin():
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
 	}
 
 	c.circuitBreaker.RecordSuccess()
+	stealth.Global.Record(stealth.RequestRecord{
+		Timestamp:  time.Now(),
+		URL:        rawURL,
+		Method:     http.MethodPost,
+		StatusCode: resp.StatusCode,
+		Latency:    time.Since(reqStart),
+		RiskLevel:  stealth.RiskNone,
+		Error:      "",
+		UA:         req.Header.Get("User-Agent"),
+	})
 	return bodyStr, nil
 }
 
@@ -272,9 +364,20 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Origin", c.baseURL)
 
+	reqStart := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: 0,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      err.Error(),
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return "", fmt.Errorf("POST请求失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -282,15 +385,86 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	body, err := readResponseBody(resp)
 	if err != nil {
 		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      err.Error(),
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
 
+	bodyStr := string(body)
+
+	// 风控信号检测
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	switch {
+	case signal.ShouldStop():
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return bodyStr, fmt.Errorf("[风控-停止] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldBackoff():
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return bodyStr, fmt.Errorf("[风控-限流] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldReLogin():
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
+	}
+
 	c.circuitBreaker.RecordSuccess()
+	stealth.Global.Record(stealth.RequestRecord{
+		Timestamp:  time.Now(),
+		URL:        rawURL,
+		Method:     http.MethodPost,
+		StatusCode: resp.StatusCode,
+		Latency:    time.Since(reqStart),
+		RiskLevel:  stealth.RiskNone,
+		Error:      "",
+		UA:         req.Header.Get("User-Agent"),
+	})
 	return string(body), nil
 }
 
 // doPostWithReferer POST 请求，支持自定义 Referer（登录专用）
 func (c *Client) doPostWithReferer(rawURL string, data map[string]string, referer string) (string, error) {
+	// 熔断器检查
+	if err := c.circuitBreaker.Allow(); err != nil {
+		return "", err
+	}
+
 	values := url.Values{}
 	for k, v := range data {
 		values.Set(k, v)
@@ -308,16 +482,112 @@ func (c *Client) doPostWithReferer(rawURL string, data map[string]string, refere
 	req.Header.Set("Referer", referer)
 	req.Header.Set("Origin", c.baseURL)
 
+	reqStart := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: 0,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      err.Error(),
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return "", fmt.Errorf("POST请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := readResponseBody(resp)
 	if err != nil {
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      err.Error(),
+			UA:         req.Header.Get("User-Agent"),
+		})
 		return "", fmt.Errorf("读取响应失败: %w", err)
 	}
+
+	bodyStr := string(body)
+
+	// 风控信号检测
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr)
+	switch {
+	case signal.ShouldStop():
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return bodyStr, fmt.Errorf("[风控-停止] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldBackoff():
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return bodyStr, fmt.Errorf("[风控-限流] %s (触发词: %s)", signal.Message, signal.Keyword)
+	case signal.ShouldReLogin():
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  signal.Level,
+			Error:      signal.Message,
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Request.URL.String())
+	}
+
+	c.circuitBreaker.RecordSuccess()
+	stealth.Global.Record(stealth.RequestRecord{
+		Timestamp:  time.Now(),
+		URL:        rawURL,
+		Method:     http.MethodPost,
+		StatusCode: resp.StatusCode,
+		Latency:    time.Since(reqStart),
+		RiskLevel:  stealth.RiskNone,
+		Error:      "",
+		UA:         req.Header.Get("User-Agent"),
+	})
 	return string(body), nil
 }
 

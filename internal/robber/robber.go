@@ -89,7 +89,9 @@ func NewRobber(clt *client.Client, log *logger.Logger) *Robber {
 
 // Start 登录并在后台启动抢课任务（非阻塞）
 func (r *Robber) Start(cfg *model.Config) error {
+	r.mu.Lock()
 	if r.running {
+		r.mu.Unlock()
 		return fmt.Errorf("抢课已经在运行中")
 	}
 
@@ -109,6 +111,7 @@ func (r *Robber) Start(cfg *model.Config) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
+	r.mu.Unlock()
 
 	// 同步登录
 	r.logger.Info("正在登录教务系统...")
@@ -143,7 +146,9 @@ func (r *Robber) Start(cfg *model.Config) error {
 
 // Stop 停止抢课
 func (r *Robber) Stop() {
+	r.mu.Lock()
 	if !r.running {
+		r.mu.Unlock()
 		return
 	}
 
@@ -153,21 +158,24 @@ func (r *Robber) Stop() {
 	if r.cancel != nil {
 		r.cancel()
 	}
+	r.mu.Unlock()
 
-	go func() {
-		r.wg.Wait()
-		r.mu.Lock()
-		sc, fc, rc := r.successCount, r.failCount, r.reloginCount
-		r.mu.Unlock()
-		r.logger.Info(fmt.Sprintf(
-			"抢课已停止 | 成功: %d | 失败: %d | 重新登录: %d | 熔断器: %s",
-			sc, fc, rc, r.client.CircuitBreaker().StateName(),
-		))
-	}()
+	r.wg.Wait()
+
+	r.mu.Lock()
+	sc, fc, rc := r.successCount, r.failCount, r.reloginCount
+	r.mu.Unlock()
+
+	r.logger.Info(fmt.Sprintf(
+		"抢课已停止 | 成功: %d | 失败: %d | 重新登录: %d | 熔断器: %s",
+		sc, fc, rc, r.client.CircuitBreaker().StateName(),
+	))
 }
 
-// IsRunning 返回当前是否正在运行
+// IsRunning 返回当前是否正在运行（线程安全）
 func (r *Robber) IsRunning() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.running
 }
 

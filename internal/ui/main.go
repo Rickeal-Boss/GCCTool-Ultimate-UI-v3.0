@@ -29,6 +29,10 @@ type App struct {
 	robber *robber.Robber
 	logger *logger.Logger
 
+	// 上下文管理（用于优雅关闭所有 goroutine）
+	ctx    context.Context
+	cancel  context.CancelFunc
+
 	// 液态玻璃操作按钮
 	startLiquid *LiquidButton
 	stopLiquid  *LiquidButton
@@ -44,6 +48,9 @@ func NewApp() *App {
 		app: app.New(),
 	}
 	a.app.Settings().SetTheme(&materialYellowTheme{})
+
+	// 初始化上下文管理
+	a.ctx, a.cancel = context.WithCancel(context.Background())
 
 	a.initWindow()
 	a.initComponents()
@@ -429,6 +436,8 @@ func (a *App) setStatus(text string, col color.NRGBA) {
 
 // Run 启动应用主循环
 func (a *App) Run() {
+	// 应用关闭时取消所有 goroutine
+	defer a.cancel()
 	a.window.ShowAndRun()
 }
 
@@ -478,16 +487,23 @@ func (a *App) loadSavedConfig() {
 func (a *App) startTelemetryLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		if a.robber == nil || !a.robber.IsRunning() {
-			continue
-		}
-		// 输出遥测摘要
-		a.logger.Info(stealth.Global.Summary())
-		// 输出策略建议
-		advices := stealth.Global.Analyze()
-		if len(advices) > 0 {
-			a.logger.Warn(stealth.FormatAdvices(advices))
+
+	for {
+		select {
+		case <-ticker.C:
+			if a.robber == nil || !a.robber.IsRunning() {
+				continue
+			}
+			// 输出遥测摘要
+			a.logger.Info(stealth.Global.Summary())
+			// 输出策略建议
+			advices := stealth.Global.Analyze()
+			if len(advices) > 0 {
+				a.logger.Warn(stealth.FormatAdvices(advices))
+			}
+		case <-a.ctx.Done():
+			// 应用关闭，退出循环
+			return
 		}
 	}
 }
