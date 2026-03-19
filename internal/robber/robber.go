@@ -395,16 +395,17 @@ func (r *Robber) worker(ctx context.Context, id int) {
 
 			if reloginAttempts > maxReLoginAttempts {
 				r.logger.Error(fmt.Sprintf("Worker %d Session 失效，重新登录已达上限 %d 次，停止此 Worker", id, maxReLoginAttempts))
-				// 输出已获取的课程信息，供用户手动接管
 				r.logCourseInfoForManualTakeover()
 				return
 			}
 
 			r.logger.Warn(fmt.Sprintf("Worker %d Session 失效，正在重新登录（第 %d/%d 次）...", id, reloginAttempts, maxReLoginAttempts))
 			if loginErr := r.tryRelogin(ctx, reloginAttempts); loginErr != nil {
+				// 任务被用户主动取消时，不触发课程信息输出
+				if strings.Contains(loginErr.Error(), "任务已取消") {
+					return
+				}
 				r.logger.Error(fmt.Sprintf("Worker %d 重新登录失败: %v", id, loginErr))
-				// 输出已获取的课程信息，供用户手动接管
-				r.logCourseInfoForManualTakeover()
 				// 短暂等待后再试
 				select {
 				case <-ctx.Done():
@@ -431,7 +432,12 @@ func (r *Robber) worker(ctx context.Context, id int) {
 			// 普通失败：重置退避，短暂等待后继续
 			backoffSec = 0
 			state = wsNormal
-			r.logger.Error(fmt.Sprintf("Worker %d 抢课失败: %v", id, err))
+			// 选课未开放/系统维护属于正常等待状态，用 Info 级别而非 Error
+			if strings.Contains(errMsg, "选课未开放") || strings.Contains(errMsg, "系统维护") {
+				r.logger.Info(fmt.Sprintf("Worker %d: %v，等待重试...", id, err))
+			} else {
+				r.logger.Error(fmt.Sprintf("Worker %d 抢课失败: %v", id, err))
+			}
 		}
 
 		// 每轮结束后随机延迟（反检测：避免机械均匀间隔）

@@ -3,24 +3,75 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"golang.org/x/net/html"
 
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
+	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/stealth"
 )
 
 // GetClassList 获取课程列表
+//
+// 关键修复：先用不跟随重定向的方式探测选课首页，
+// 明确区分 "Session失效(302跳转)" 和 "选课未开放(200正常页面)"，
+// 避免系统维护/未开放页面被误判为 Session 失效。
 func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
-	// 步骤1: 获取选课首页（携带 gnmkdm 参数，正方 V9 必须）
 	indexURL := c.buildURL(pathSelectIndex) + "?gnmkdm=" + gnmkdmSelect + "&layout=default"
+
+	// 步骤0: 用不跟随重定向的探测请求判断 Session 状态
+	// 原因：http.Client 默认跟随302，会自动跳到登录页，导致拿到登录页HTML后被误判为Session失效
+	// 修复：先单独发一个不跟随重定向的请求，只看 HTTP 状态码
+	probeReq, err := http.NewRequest(http.MethodGet, indexURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("构建选课页探测请求失败: %w", err)
+	}
+	stealth.InjectHeaders(probeReq)
+	probeReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	// 使用不跟随重定向的客户端
+	probeClient := &http.Client{
+		Timeout:   c.httpClient.Timeout,
+		Jar:       c.httpClient.Jar,
+		Transport: c.httpClient.Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse // 不跟随重定向，直接返回原始302
+		},
+	}
+
+	probeResp, probeErr := probeClient.Do(probeReq)
+	if probeErr == nil {
+		defer probeResp.Body.Close()
+		// 302/301 跳转到登录页 → Session 真的失效
+		if probeResp.StatusCode == http.StatusFound || probeResp.StatusCode == http.StatusMovedPermanently {
+			location := probeResp.Header.Get("Location")
+			if strings.Contains(location, "login_slogin") || strings.Contains(location, "slogin") {
+				return nil, fmt.Errorf("[风控-会话] Session已失效，服务器重定向到登录页(302)")
+			}
+		}
+	}
+
+	// 步骤1: 正常 GET 选课首页（会跟随重定向），获取 hidden input
 	indexHTML, err := c.doGet(indexURL)
 	if err != nil {
 		return nil, err
 	}
 
+	// 检测选课未开放 —— 这是正常业务状态，不是Session失效
+	if strings.Contains(indexHTML, "不属于选课阶段") ||
+		strings.Contains(indexHTML, "不在选课时间") ||
+		strings.Contains(indexHTML, "当前不属于选课") {
+		return nil, fmt.Errorf("选课未开放：当前不在选课阶段，请等待系统开放后再试")
+	}
+
+	// 检测系统维护 —— 同样不是Session失效
+	if strings.Contains(indexHTML, "系统正在维护") ||
+		strings.Contains(indexHTML, "系统维护") {
+		return nil, fmt.Errorf("系统维护：教务系统正在维护，请稍后再试")
+	}
+
 	postData1 := c.parseHiddenInputs(indexHTML)
-	// 补充 gnmkdm，POST 请求也需要携带
 	postData1["gnmkdm"] = gnmkdmSelect
 
 	// 步骤2: 获取选课参数
