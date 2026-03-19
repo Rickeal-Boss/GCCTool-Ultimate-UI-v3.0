@@ -519,8 +519,8 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 }
 
 func (a *App) onStopClicked() {
-	a.logger.Info("正在停止抢课...")
 	// Anti-Fix-Bug: 添加 nil 检查，防止崩溃
+	// "正在停止抢课" 日志由 robber.Stop() 内部统一输出，此处不重复打印
 	if a.robber != nil {
 		a.robber.Stop()
 	}

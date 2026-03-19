@@ -357,6 +357,15 @@ func (r *Robber) worker(ctx context.Context, id int) {
 			}
 		}
 
+		// Anti-Fix-Bug: 发起请求前再次检查停止信号，避免极速模式下
+		// "停止信号已发出但当轮请求已通过检查"导致的滞后日志
+		select {
+		case <-ctx.Done():
+			r.logger.Info(fmt.Sprintf("Worker %d 停止", id))
+			return
+		default:
+		}
+
 		err := r.robCourse(id)
 
 		if err == nil {
@@ -433,8 +442,17 @@ func (r *Robber) worker(ctx context.Context, id int) {
 			backoffSec = 0
 			state = wsNormal
 			// 选课未开放/系统维护属于正常等待状态，用 Info 级别而非 Error
-			if strings.Contains(errMsg, "选课未开放") || strings.Contains(errMsg, "系统维护") {
+			isNotOpen := strings.Contains(errMsg, "选课未开放") || strings.Contains(errMsg, "系统维护")
+			if isNotOpen {
+				// Anti-Fix-Bug: 选课未开放时强制等待 300ms，避免极速模式下毫秒级狂刷日志
+				// 选课开放的瞬间延迟仅 300ms，影响可忽略不计
 				r.logger.Info(fmt.Sprintf("Worker %d: %v，等待重试...", id, err))
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(300 * time.Millisecond):
+				}
+				continue
 			} else {
 				r.logger.Error(fmt.Sprintf("Worker %d 抢课失败: %v", id, err))
 			}
