@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -28,7 +29,9 @@ type App struct {
 	window fyne.Window
 	ui     *model.UIComponents
 	client *client.Client
-	robber *robber.Robber
+	// robber 由 UI 线程在每次启动时重建，但会被后台 goroutine（手动选课、遥测循环）
+	// 并发读取，故用 atomic.Pointer 保证跨线程读写的可见性与无数据竞争。
+	robber atomic.Pointer[robber.Robber]
 	logger *logger.Logger
 
 	// 上下文管理（用于优雅关闭所有 goroutine）
@@ -183,7 +186,7 @@ func (a *App) initClient() {
 }
 
 func (a *App) initRobber() {
-	a.robber = robber.NewRobber(a.client, a.logger)
+	a.robber.Store(robber.NewRobber(a.client, a.logger))
 }
 
 // ── UI 构建 ───────────────────────────────────────────────────────────────────
@@ -547,9 +550,10 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 	// 与 onStopClicked / refreshCourseList 的读产生数据竞争；NewClientWithProxy 与
 	// NewRobber 均为纯内存构造，不发起网络请求，不会阻塞 UI）。
 	a.client = client.NewClientWithProxy(cfg.NodeURL, cfg.Agent)
-	a.robber = robber.NewRobber(a.client, a.logger)
+	a.robber.Store(robber.NewRobber(a.client, a.logger))
 
 	go func() {
+		r := a.robber.Load()
 		defer func() {
 			// 说明：这里原本有一段"密码原地清零"代码，已删除。两个原因：
 			//  1. 它本身是无效的 —— []byte(s) 会复制字符串，清零的只是副本，
@@ -558,13 +562,13 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 			//     Start() 登录完就返回，defer 随即把 cfg.Password 置空；几小时后
 			//     Session 失效触发重新登录时密码已是空串，重登必然失败，账号还有被锁风险。
 			// 真正要在内存里保护密码需要全链路改用 []byte，属独立改造，不在本次范围。
-			if r := recover(); r != nil {
-				a.logger.Error(fmt.Sprintf("抢课任务异常: %v", r))
+			if rec := recover(); rec != nil {
+				a.logger.Error(fmt.Sprintf("抢课任务异常: %v", rec))
 				a.resetUIAfterStop()
 			}
 		}()
 
-		if err := a.robber.Start(cfg); err != nil {
+		if err := r.Start(cfg); err != nil {
 			a.logger.Error(fmt.Sprintf("启动失败: %v", err))
 			a.resetUIAfterStop()
 			return
@@ -578,8 +582,8 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 func (a *App) onStopClicked() {
 	// Anti-Fix-Bug: 添加 nil 检查，防止崩溃
 	// "正在停止抢课" 日志由 robber.Stop() 内部统一输出，此处不重复打印
-	if a.robber != nil {
-		a.robber.Stop()
+	if r := a.robber.Load(); r != nil {
+		r.Stop()
 	}
 	a.resetUIAfterStop()
 }
@@ -612,7 +616,7 @@ func (a *App) setStatus(text string, col color.NRGBA) {
 
 // refreshCourseList 刷新课程列表显示
 func (a *App) refreshCourseList() {
-	if a.robber == nil {
+	if a.robber.Load() == nil {
 		dialog.ShowInformation("提示", "请先启动抢课任务以获取课程列表", a.window)
 		return
 	}
@@ -620,8 +624,9 @@ func (a *App) refreshCourseList() {
 		return
 	}
 
-	list := a.robber.GetLastCourseList()
-	matched := a.robber.GetLastMatchedCourses()
+	r := a.robber.Load()
+	list := r.GetLastCourseList()
+	matched := r.GetLastMatchedCourses()
 
 	// 展示优先级：命中筛选的课程 > 服务端返回的全部课程
 	items := matched
@@ -707,7 +712,8 @@ func formatCredit(credit int) string {
 
 // manualSelectCourse 在应用内手动选择课程
 func (a *App) manualSelectCourse(course *model.Course) {
-	if a.robber == nil {
+	r := a.robber.Load()
+	if r == nil {
 		dialog.ShowError(fmt.Errorf("抢课器未初始化，请先启动任务"), a.window)
 		return
 	}
@@ -739,7 +745,7 @@ func (a *App) manualSelectCourse(course *model.Course) {
 		go func() {
 			a.logger.Info(fmt.Sprintf("正在手动选课: %s (%s)...", course.Name, course.Teacher))
 
-			err := a.robber.ManualSelectCourse(course)
+			err := r.ManualSelectCourse(course)
 			if err != nil {
 				a.logger.Error(fmt.Sprintf("手动选课失败: %v", err))
 				dialog.ShowError(fmt.Errorf("选课失败: %v", err), a.window)
@@ -820,7 +826,8 @@ func (a *App) startTelemetryLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if a.robber == nil || !a.robber.IsRunning() {
+			r := a.robber.Load()
+			if r == nil || !r.IsRunning() {
 				continue
 			}
 			// 输出遥测摘要
