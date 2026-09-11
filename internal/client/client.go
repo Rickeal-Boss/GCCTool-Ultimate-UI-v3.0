@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -199,6 +200,33 @@ func (c *Client) BackoffStrategy() *stealth.BackoffStrategy {
 	return c.backoffStrategy
 }
 
+// maxResponseBodyBytes 单个响应体（解压后）允许的最大字节数。
+//
+// 安全加固：响应体原本一律用 io.ReadAll 无上限读取。若服务端被入侵、
+// 用户自配的代理被劫持，或明文内网节点（172.22.14.x）遭遇同网段 MITM
+// （正是本软件自己弹窗警告的场景），攻击者可以返回一个极小的 gzip/deflate 流，
+// 解压后膨胀到数 GB（即"解压炸弹"），在 15s 超时内就能把进程内存打爆。
+// 这里给解压后的体积设上限；正常课程列表 JSON / 页面 HTML 远小于该值。
+const maxResponseBodyBytes = 16 << 20 // 16 MiB
+
+// errBodyTooLarge 响应体超过 maxResponseBodyBytes
+var errBodyTooLarge = errors.New("响应体超过大小上限")
+
+// readAllLimited 读取 r，最多读取 maxResponseBodyBytes 字节。
+//
+// 超限返回包裹了 errBodyTooLarge 的错误（调用方可用 errors.Is 判断），
+// 而不是返回被截断的内容——截断的 JSON/HTML 会让下游解析报出难以理解的错。
+func readAllLimited(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxResponseBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxResponseBodyBytes {
+		return nil, fmt.Errorf("%w：超过 %d 字节（可能是异常或恶意响应）", errBodyTooLarge, maxResponseBodyBytes)
+	}
+	return data, nil
+}
+
 // readResponseBody 读取 HTTP 响应体，自动处理 gzip / deflate 压缩
 //
 // 修复点（V3.0 bug）：请求头声明了 `Accept-Encoding: gzip, deflate`
@@ -214,7 +242,7 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 
 	switch encoding {
 	case "gzip", "x-gzip":
-		raw, err := io.ReadAll(resp.Body)
+		raw, err := readAllLimited(resp.Body)
 		if err != nil {
 			return nil, err
 		}
@@ -226,13 +254,12 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 			return raw, nil // 声明了 gzip 但实际没压缩，原样返回
 		}
 		defer gr.Close()
-		if out, err := io.ReadAll(gr); err == nil {
-			return out, nil
-		}
-		return raw, nil
+		// 解压后读取失败不再回退成"返回原始压缩字节"——那等于把压缩垃圾交给
+		// 下游当 JSON/HTML 解析。超限或流损坏都直接报错。
+		return readAllLimited(gr)
 
 	case "deflate":
-		raw, err := io.ReadAll(resp.Body)
+		raw, err := readAllLimited(resp.Body)
 		if err != nil {
 			return nil, err
 		}
@@ -242,21 +269,29 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 		// 1) zlib 封装（RFC 1950，最常见）
 		if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
 			defer zr.Close()
-			if out, err := io.ReadAll(zr); err == nil {
+			if out, err := readAllLimited(zr); err == nil {
 				return out, nil
+			} else if errors.Is(err, errBodyTooLarge) {
+				// 超限是确定结论，没有必要再试裸 deflate
+				return nil, err
 			}
+			// 其他读取错误：继续尝试裸 deflate
 		}
 		// 2) 裸 deflate（RFC 1951，部分中间件/代理会这样返回）
 		fr := flate.NewReader(bytes.NewReader(raw))
 		defer fr.Close()
-		if out, err := io.ReadAll(fr); err == nil {
-			return out, nil
+		out, err := readAllLimited(fr)
+		if err != nil {
+			if errors.Is(err, errBodyTooLarge) {
+				return nil, err
+			}
+			// 3) 声明了 deflate 但实际未压缩
+			return raw, nil
 		}
-		// 3) 声明了 deflate 但实际未压缩
-		return raw, nil
+		return out, nil
 	}
 
-	return io.ReadAll(resp.Body)
+	return readAllLimited(resp.Body)
 }
 
 // doGet GET请求（集成反检测引擎 + 熔断器检查）
