@@ -543,6 +543,12 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 	a.logger.Clear()
 	a.logger.Info("开始抢课任务...")
 
+	// 重建客户端与抢课器（在 UI 线程同步完成，避免 goroutine 内写 a.client/a.robber
+	// 与 onStopClicked / refreshCourseList 的读产生数据竞争；NewClientWithProxy 与
+	// NewRobber 均为纯内存构造，不发起网络请求，不会阻塞 UI）。
+	a.client = client.NewClientWithProxy(cfg.NodeURL, cfg.Agent)
+	a.robber = robber.NewRobber(a.client, a.logger)
+
 	go func() {
 		defer func() {
 			// 说明：这里原本有一段"密码原地清零"代码，已删除。两个原因：
@@ -557,10 +563,6 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 				a.resetUIAfterStop()
 			}
 		}()
-
-		// 重建客户端（使用当前节点 + 代理）
-		a.client = client.NewClientWithProxy(cfg.NodeURL, cfg.Agent)
-		a.robber = robber.NewRobber(a.client, a.logger)
 
 		if err := a.robber.Start(cfg); err != nil {
 			a.logger.Error(fmt.Sprintf("启动失败: %v", err))

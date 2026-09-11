@@ -104,5 +104,11 @@ func sanitizeLog(message string) string {
 		result = strings.ReplaceAll(result, path, "[REDACTED]")
 	}
 
+	// 4. 折叠换行符，防止日志注入（Log Injection）
+	// 服务端响应体会被原样写入日志（如选课结果的 previewOf 预览、HTML 错误页提取文本）。
+	// 若其中夹带 \n / \r，会在 UI 日志与"复制日志"里伪造出额外的假日志行，误导用户。
+	// 统一替换为空格，既保留信息又不破坏单行结构。
+	result = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(result)
+
 	return result
 }

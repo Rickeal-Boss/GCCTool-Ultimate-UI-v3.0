@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
@@ -69,12 +70,16 @@ type Client struct {
 	// 反检测组件
 	circuitBreaker  *stealth.CircuitBreaker
 	backoffStrategy *stealth.BackoffStrategy
-	delayProfile    stealth.DelayProfile
+	delayProfile atomic.Int32 // 存放 stealth.DelayProfile（int），以 atomic 访问
 
 	// Speed-Opt + Anti-Fix: 抢课模式标志
 	// true: 抢课阶段（极速模式 + 只检测账号封禁）
 	// false: 登录/等待阶段（正常模式 + 完整风控检测）
-	isRobbing bool
+	// ⚠️ 使用 atomic：doGet/doPost 在 worker goroutine 中读取本标志，
+	// 而 SetRobbingMode/SetDelayProfile 在调度 goroutine 中写入，
+	// 无锁并发读写 bool/int 属于典型 Go data race（go test -race 会告警），
+	// 故改用 atomic 消除隐患。
+	isRobbing atomic.Bool
 
 	// mu 保护 selectInitParams
 	mu sync.Mutex
@@ -122,7 +127,6 @@ func NewClient(nodeURL string) *Client {
 		circuitBreaker: stealth.NewCircuitBreaker("正方教务"),
 		// 退避策略：5s起步，最大60s，2倍指数增长，带抖动
 		backoffStrategy: stealth.NewBackoffStrategy(5*time.Second, 60*time.Second, 2.0, true),
-		delayProfile:    stealth.DelayNormal,
 	}
 }
 
@@ -156,13 +160,12 @@ func NewClientWithProxy(nodeURL, agentURL string) *Client {
 
 		circuitBreaker:  stealth.NewCircuitBreaker("正方教务（代理）"),
 		backoffStrategy: stealth.NewBackoffStrategy(5*time.Second, 60*time.Second, 2.0, true),
-		delayProfile:    stealth.DelayNormal,
 	}
 }
 
 // SetDelayProfile 动态调整延迟档位（外部可调用，如即将开抢时切 Aggressive）
 func (c *Client) SetDelayProfile(p stealth.DelayProfile) {
-	c.delayProfile = p
+	c.delayProfile.Store(int32(p))
 }
 
 // SetRobbingMode 设置抢课模式（极致速度 + 精准风控）
@@ -171,19 +174,19 @@ func (c *Client) SetDelayProfile(p stealth.DelayProfile) {
 //   - true: 抢课阶段（极速模式 + 只检测账号封禁）
 //   - false: 登录/等待阶段（正常模式 + 完整风控检测）
 func (c *Client) SetRobbingMode(enabled bool) {
-	c.isRobbing = enabled
+	c.isRobbing.Store(enabled)
 	if enabled {
 		// 抢课模式：切换到极速模式
-		c.delayProfile = stealth.DelayUltra
+		c.delayProfile.Store(int32(stealth.DelayUltra))
 	} else {
 		// 非抢课模式：恢复到正常模式
-		c.delayProfile = stealth.DelayNormal
+		c.delayProfile.Store(int32(stealth.DelayNormal))
 	}
 }
 
 // IsRobbingMode 检查是否处于抢课模式
 func (c *Client) IsRobbingMode() bool {
-	return c.isRobbing
+	return c.isRobbing.Load()
 }
 
 // CircuitBreaker 暴露熔断器（供 robber 查询状态）
@@ -290,7 +293,7 @@ func (c *Client) doGet(rawURL string) (string, error) {
 	bodyStr := string(body)
 
 	// Speed-Opt + Anti-Fix: 风控信号检测（抢课模式下只检测账号封禁）
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing.Load())
 
 	switch {
 	case signal.ShouldStop():
@@ -427,7 +430,7 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	bodyStr := string(body)
 
 	// 风控信号检测
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing.Load())
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
@@ -568,7 +571,7 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 	bodyStr := string(body)
 
 	// 风控信号检测
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing.Load())
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
@@ -714,7 +717,7 @@ func (c *Client) doPostWithReferer(rawURL string, data map[string]string, refere
 	bodyStr := string(body)
 
 	// 风控信号检测
-	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing)
+	signal := stealth.DetectRisk(resp.StatusCode, bodyStr, c.isRobbing.Load())
 	switch {
 	case signal.ShouldStop():
 		c.circuitBreaker.RecordFailure()
@@ -808,7 +811,7 @@ func (c *Client) CheckSessionAlive() error {
 
 // DelayProfile 返回当前延迟档位（供 robber 读取）
 func (c *Client) DelayProfile() stealth.DelayProfile {
-	return c.delayProfile
+	return stealth.DelayProfile(c.delayProfile.Load())
 }
 
 // SetSelectInitParams 缓存选课初始化参数（由 GetClassList 在解析选课首页/Display 页后调用）
