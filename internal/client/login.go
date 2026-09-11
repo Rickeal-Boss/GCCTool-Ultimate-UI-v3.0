@@ -285,6 +285,11 @@ func base64ModExpToBase64DER(modB64, expB64 string) (string, error) {
 
 	n := new(big.Int).SetBytes(modBytes)
 	e := new(big.Int).SetBytes(expBytes)
+	// 指数过大时 Int64() 会静默截断成低位 64 位，得到一个"能解析但完全错误"的公钥。
+	// 这里直接拒绝，而不是带着错误密钥继续加密密码。
+	if !e.IsInt64() {
+		return "", fmt.Errorf("RSA 公钥指数过大（超过 64 位），疑似异常响应")
+	}
 
 	rsaPub := &rsa.PublicKey{N: n, E: int(e.Int64())}
 	derBytes, err := x509.MarshalPKIXPublicKey(rsaPub)
@@ -375,6 +380,11 @@ func hexModExpToBase64DER(modHex, expHex string) (string, error) {
 
 	n := new(big.Int).SetBytes(modBytes)
 	e := new(big.Int).SetBytes(expBytes)
+	// 指数过大时 Int64() 会静默截断成低位 64 位，得到一个"能解析但完全错误"的公钥。
+	// 这里直接拒绝，而不是带着错误密钥继续加密密码。
+	if !e.IsInt64() {
+		return "", fmt.Errorf("RSA 公钥指数过大（超过 64 位），疑似异常响应")
+	}
 
 	rsaPub := &rsa.PublicKey{N: n, E: int(e.Int64())}
 	derBytes, err := x509.MarshalPKIXPublicKey(rsaPub)
@@ -399,6 +409,37 @@ func hexToBytes(s string) ([]byte, error) {
 		result[i/2] = b
 	}
 	return result, nil
+}
+
+// minRSAModulusBits 接受的 RSA 公钥最小模长（位）。
+//
+// 安全加固：公钥由服务端下发（/xtgl/login_getPublicKey.html 或登录页内联），
+// 客户端此前对下发的密钥**不做任何强度校验** —— 只要塞得下 PKCS1v15 填充就照单全收。
+// 在明文内网节点（172.22.14.x）下，同网段 MITM 可以把公钥换成一把自己生成的
+// 极短（如 256 位）密钥，客户端用它加密密码后，攻击者可秒级分解模数还原明文密码。
+//
+// 取 512 位作为下限：正方 V9 实际部署多为 1024 位，512 的下限既能拦住
+// "随手生成一把可秒解的短密钥"，又不会影响任何真实部署。
+const minRSAModulusBits = 512
+
+// validateRSAPublicKey 校验服务端下发的 RSA 公钥是否健全到"可以用来加密密码"。
+//
+// 防护边界（如实声明）：这**不能**防御"攻击者在同一明文通道里换成一把自己生成的
+// 1024/2048 位公钥"——那把密钥在数学上完全合法，只能靠 HTTPS（节点1-5）从根上解决。
+// 这里挡的是"短到可以离线分解"的弱密钥，以及畸形/非法的指数。
+func validateRSAPublicKey(pub *rsa.PublicKey) error {
+	if pub == nil || pub.N == nil || pub.N.Sign() <= 0 {
+		return fmt.Errorf("RSA 公钥 modulus 缺失或非法")
+	}
+	if bits := pub.N.BitLen(); bits < minRSAModulusBits {
+		return fmt.Errorf("RSA 公钥模长仅 %d 位，低于安全下限 %d 位（疑似被替换的弱密钥，登录已中止）",
+			bits, minRSAModulusBits)
+	}
+	// 常见指数为 65537；小于 3 或偶数都不合法（偶数会导致加解密不可逆）
+	if pub.E < 3 || pub.E%2 == 0 {
+		return fmt.Errorf("RSA 公钥指数非法: E=%d（登录已中止）", pub.E)
+	}
+	return nil
 }
 
 // encryptWithRSA 使用服务端 RSA 公钥加密密码
@@ -444,6 +485,12 @@ func encryptWithRSA(pubKeyStr, password string) (string, error) {
 	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
 		return "", fmt.Errorf("公钥类型错误，期望 RSA，实际 %T", pub)
+	}
+
+	// 强度校验：所有公钥来源（API 接口 / 登录页内联 / PEM 文件）最终都汇聚到这里，
+	// 在此统一把关，避免"服务端下发什么就用什么"。
+	if err := validateRSAPublicKey(rsaPub); err != nil {
+		return "", err
 	}
 
 	encrypted, err := rsa.EncryptPKCS1v15(rand.Reader, rsaPub, []byte(password))
