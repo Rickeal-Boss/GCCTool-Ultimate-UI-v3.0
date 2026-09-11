@@ -4,12 +4,21 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
 
 const maxLogLines = 500
+
+// logFlushInterval UI 日志合并刷新间隔
+//
+// 修复（V3.0 性能问题）：原实现每收到一条日志就把全部行 strings.Join 再 SetText，
+// 500 行 × 极速模式下每秒上千条 = O(n²) 字符串拼接，日志系统反过来拖慢抢课、
+// 界面卡顿多半源于此。改为累积缓冲、按固定频率合并渲染一次。
+const logFlushInterval = 120 * time.Millisecond
 
 // UIComponents UI组件集合
 type UIComponents struct {
@@ -37,9 +46,13 @@ type UIComponents struct {
 	CopyLogBtn *widget.Button
 
 	// 日志
-	LogLabel *widget.Label
+	LogLabel  *widget.Label
 	LogScroll *container.Scroll
-	logLines []string // 内部切片，限制行数
+	logLines  []string // 内部切片，限制行数
+
+	// logMu 保护 logLines / logDirty
+	logMu    sync.Mutex
+	logDirty bool
 
 	// 课程列表
 	CourseList *widget.List
@@ -84,6 +97,15 @@ func NewUIComponents() *UIComponents {
 	ui.TeacherEntry.SetPlaceHolder("例如: 张三")
 	ui.CourseNumEntry.SetPlaceHolder("例如: 0200200200,0200200201")
 
+	// 后台合并刷新日志（见 AppendLog / flushLogs 的说明）
+	go func() {
+		ticker := time.NewTicker(logFlushInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			ui.flushLogs()
+		}
+	}()
+
 	return ui
 }
 
@@ -126,7 +148,7 @@ func (ui *UIComponents) GetConfig() (*Config, error) {
 	// 解析课程分类
 	for i, check := range ui.CategoryChecks {
 		if check != nil && check.Checked {
-			cfg.Categories[getCategoryLabel(i)] = true
+			cfg.Categories[CategoryLabelAt(i)] = true
 		}
 	}
 
@@ -159,27 +181,56 @@ func (ui *UIComponents) UpdateCourseList(courses []*Course) {
 	}
 }
 
-// AppendLog 追加日志（v2.5 线程安全说明）
+// AppendLog 追加日志
 //
 // Fyne v2.5 对所有 canvas 写操作（SetText、Refresh 等）内部使用容器锁保护，
 // 可以在任意 goroutine 中直接调用，无需额外同步。
 // （v2.6 移除了容器锁并引入 fyne.Do；本项目锁定 v2.5.3，不使用 fyne.Do。）
 //
-// 日志行数超过 maxLogLines 时丢弃最旧的 1/4，防止内存无限增长。
+// 这里只把日志追加到内存缓冲并标脏，真正的渲染交给 flushLogs 按固定频率合并完成，
+// 避免高频日志下的 O(n²) 拼接与界面卡顿。
 func (ui *UIComponents) AppendLog(message string) {
+	ui.logMu.Lock()
+	defer ui.logMu.Unlock()
+
 	ui.logLines = append(ui.logLines, message)
 	if len(ui.logLines) > maxLogLines {
 		keep := maxLogLines * 3 / 4
 		ui.logLines = ui.logLines[len(ui.logLines)-keep:]
 	}
-	ui.LogLabel.SetText(strings.Join(ui.logLines, "\n"))
+	ui.logDirty = true
+}
+
+// flushLogs 把累积的日志合并渲染一次（由后台 ticker 周期调用）
+func (ui *UIComponents) flushLogs() {
+	ui.logMu.Lock()
+	if !ui.logDirty {
+		ui.logMu.Unlock()
+		return
+	}
+	text := strings.Join(ui.logLines, "\n")
+	ui.logDirty = false
+	ui.logMu.Unlock()
+
+	ui.LogLabel.SetText(text)
 	ui.LogScroll.ScrollToBottom()
+}
+
+// FlushLogs 立即渲染待刷新的日志
+//
+// 供"复制日志"等需要最新内容的场景调用，避免拿到尚未渲染的滞后内容。
+func (ui *UIComponents) FlushLogs() {
+	ui.flushLogs()
 }
 
 // ClearLog 清空日志
 func (ui *UIComponents) ClearLog() {
+	ui.logMu.Lock()
 	ui.logLines = ui.logLines[:0]
-	ui.LogLabel.SetText("")
+	ui.logDirty = true
+	ui.logMu.Unlock()
+
+	ui.flushLogs()
 }
 
 // parseIntField 解析整数字段。
@@ -198,14 +249,20 @@ func parseIntField(name, raw string, def int) (int, error) {
 	return v, nil
 }
 
-func getCategoryLabel(index int) string {
+// CategoryLabelAt 返回第 index 个课程分类的中文标签（供 UI 回填勾选状态）
+func CategoryLabelAt(index int) string {
 	labels := []string{
 		"科技类", "人文类", "经营类",
 		"体育类", "创新创业类", "艺术类",
 		"自然科学类", "思政类", "其他类",
 	}
-	if index < len(labels) {
+	if index >= 0 && index < len(labels) {
 		return labels[index]
 	}
 	return ""
+}
+
+// CategoryCount 课程分类选项数量
+func CategoryCount() int {
+	return 9
 }

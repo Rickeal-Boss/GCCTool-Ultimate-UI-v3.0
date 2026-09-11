@@ -53,6 +53,30 @@ type CourseList struct {
 	Items []*Course
 }
 
+// Clone 拷贝课程列表（Course 按值复制，Extra 指针置空）
+//
+// 用途：课程列表短 TTL 缓存需要把同一份查询结果分发给多个并发 Worker，
+// 而 robCourse 会写入 course.Extra（详情接口返回值）。若共享同一批指针，
+// 多 Worker 并发写 Extra 会产生数据竞争；Clone 让每个 Worker 拿到独立副本。
+func (cl *CourseList) Clone() *CourseList {
+	if cl == nil {
+		return nil
+	}
+	out := &CourseList{
+		Total: cl.Total,
+		Items: make([]*Course, 0, len(cl.Items)),
+	}
+	for _, c := range cl.Items {
+		if c == nil {
+			continue
+		}
+		cp := *c
+		cp.Extra = nil
+		out.Items = append(out.Items, &cp)
+	}
+	return out
+}
+
 // Match 检查课程是否匹配筛选条件
 //
 // 课程类型比较使用 model 层的统一映射：cfg.CourseType 允许是中文标签或英文代码，

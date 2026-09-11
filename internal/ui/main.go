@@ -743,6 +743,17 @@ func (a *App) loadSavedConfig() {
 	a.ui.AdvanceEntry.SetText(fmt.Sprintf("%d", cfg.Advance))
 	a.ui.ThreadEntry.SetText(fmt.Sprintf("%d", cfg.Threads))
 	a.ui.MinCreditEntry.SetText(fmt.Sprintf("%d", cfg.MinCredit))
+
+	// 修复（V3.0 bug）：课程类型与课程分类此前完全没有被恢复 ——
+	// 用户重启程序后这两项设置被静默重置为默认值（"保存了但用不上"）。
+	a.ui.CourseTypeRadio.SetSelected(model.CourseTypeLabel(cfg.CourseType))
+	for i := 0; i < model.CategoryCount(); i++ {
+		if i >= len(a.ui.CategoryChecks) || a.ui.CategoryChecks[i] == nil {
+			continue
+		}
+		a.ui.CategoryChecks[i].SetChecked(cfg.Categories[model.CategoryLabelAt(i)])
+	}
+
 	if cfg.CourseName != "" {
 		a.ui.CourseNameEntry.SetText(cfg.CourseName)
 	}

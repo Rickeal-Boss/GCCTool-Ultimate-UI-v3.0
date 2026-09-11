@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/model"
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/stealth"
 )
 
@@ -85,6 +86,24 @@ type Client struct {
 	// 这里把页面原样下发的参数整体缓存，提交时原样回填，避免硬编码字段名单
 	// （学校换版本时无需改代码）。
 	selectInitParams map[string]string
+
+	// categoryOptions 页面下发的"课程归属/课程类别"选项：选项文本 → 选项值
+	// 用于把用户在 UI 勾选的中文分类映射成教务系统真实可用的 kcgs_list 取值。
+	categoryOptions map[string]string
+
+	// ── 课程列表短 TTL 缓存 ────────────────────────────────────────────────
+	// 背景（V3.0 的架构缺陷）：每个 Worker 每轮都独立调用 GetClassList，
+	// 一次查询 = 探测 GET + 首页 GET + Display POST + 列表 POST 共 4 个请求。
+	// N 个线程（默认 10）× 毫秒级轮询间隔 → 每秒数千请求打向教务系统，
+	// 既是最快的封号路径，也是对学校服务器的实质压力。
+	//
+	// 修复：同一查询条件下，TTL 内的并发轮询复用同一次查询结果
+	// （等价于 Efarxs"拉一次课表、多线程分课去抢"的效果，但改动面小得多）。
+	// 取到缓存时返回 Clone，保证各 Worker 持有独立的 Course 对象。
+	listCacheMu  sync.Mutex
+	listCache    *model.CourseList
+	listCacheAt  time.Time
+	listCacheKey string
 }
 
 // NewClient 创建客户端
@@ -419,6 +438,14 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
 	}
 
+	// 会话失效的强信号：AJAX 接口本不该返回登录页 HTML。
+	// 原实现没有任何一处识别这种情况，于是"会话失效"既不触发重登也不报会话错误，
+	// 只表现为后续 JSON 解析失败，排查时极易误判为"接口改了"。
+	if looksLikeLoginPage(bodyStr) {
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-会话] 会话已失效（接口返回了登录页），即将尝试重新登录")
+	}
+
 	// 修复（V3.0 bug）：原 doPost 缺少状态码校验，服务端返回 500/404 的错误页
 	// 会被当作正常响应继续往下解析（doGet 与 doPostWithReferer 都有这段校验，
 	// 只有选课/查课表真正依赖的 doPost 漏了）。
@@ -544,6 +571,12 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 			UA:         req.Header.Get("User-Agent"),
 		})
 		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
+	}
+
+	// 会话失效的强信号（同 doPost）：接口返回登录页说明 Session 已失效
+	if looksLikeLoginPage(bodyStr) {
+		c.circuitBreaker.RecordFailure()
+		return bodyStr, fmt.Errorf("[风控-会话] 会话已失效（接口返回了登录页），即将尝试重新登录")
 	}
 
 	// 修复（V3.0 bug）：补齐状态码校验（与 doGet / doPost 保持一致）
@@ -754,6 +787,88 @@ func (c *Client) SelectInitParams() map[string]string {
 		cp[k] = v
 	}
 	return cp
+}
+
+// SetCategoryOptions 缓存页面下发的"课程归属/课程类别"选项（选项文本 → 选项值）
+func (c *Client) SetCategoryOptions(opts map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cp := make(map[string]string, len(opts))
+	for k, v := range opts {
+		cp[k] = v
+	}
+	c.categoryOptions = cp
+}
+
+// CategoryOptions 返回课程分类选项的副本（选项文本 → 选项值）
+func (c *Client) CategoryOptions() map[string]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cp := make(map[string]string, len(c.categoryOptions))
+	for k, v := range c.categoryOptions {
+		cp[k] = v
+	}
+	return cp
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 课程列表短 TTL 缓存
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CourseListCacheTTL 课程列表缓存有效期。
+//
+// 取 1 秒是一个折中：既把并发轮询的请求量降低约三个数量级，又保证在选课
+// 刚开放、名额刚释放的瞬间，最多 1 秒后就能看到新数据。
+const CourseListCacheTTL = 1 * time.Second
+
+// CachedCourseList 命中缓存则返回副本，否则返回 nil
+func (c *Client) CachedCourseList(key string) *model.CourseList {
+	c.listCacheMu.Lock()
+	defer c.listCacheMu.Unlock()
+
+	if c.listCache == nil || c.listCacheKey != key {
+		return nil
+	}
+	if time.Since(c.listCacheAt) > CourseListCacheTTL {
+		return nil
+	}
+	return c.listCache.Clone()
+}
+
+// CacheCourseList 写入缓存
+func (c *Client) CacheCourseList(key string, list *model.CourseList) {
+	if list == nil {
+		return
+	}
+	c.listCacheMu.Lock()
+	c.listCache = list
+	c.listCacheAt = time.Now()
+	c.listCacheKey = key
+	c.listCacheMu.Unlock()
+}
+
+// InvalidateCourseListCache 作废课程列表缓存
+//
+// 选课成功后调用：避免后续轮询继续使用"选课之前"的旧课表。
+func (c *Client) InvalidateCourseListCache() {
+	c.listCacheMu.Lock()
+	c.listCache = nil
+	c.listCacheMu.Unlock()
+}
+
+// looksLikeLoginPage 判断响应体是否为教务系统登录页
+//
+// 用途：doPost 等 AJAX 接口在会话失效时会被 302 到登录页（http.Client 默认跟随
+// 重定向，最终拿到 200 + 登录页 HTML）。V3.0 没有任何一处识别这种情况，
+// 于是"会话失效"既不触发重登也不报会话错误，只表现为"解析失败"，非常难排查。
+func looksLikeLoginPage(body string) bool {
+	lower := strings.ToLower(body)
+	if !strings.Contains(lower, "login_slogin") {
+		return false
+	}
+	return strings.Contains(lower, `type="password"`) || strings.Contains(lower, `type='password'`)
 }
 
 // buildURL 构建完整URL

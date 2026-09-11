@@ -165,6 +165,9 @@ func (l *Logger) Copy() bool {
 		return false
 	}
 
+	// 日志采用合并刷新，复制前先强制渲染一次，避免漏掉最近 120ms 内的日志
+	l.ui.FlushLogs()
+
 	text := l.ui.LogLabel.Text
 	if text == "" {
 		return false

@@ -103,7 +103,12 @@ func LoadConfig() (*Config, error) {
 	cfg.Hour = p.Hour
 	cfg.Minute = p.Minute
 	cfg.Advance = p.Advance
-	cfg.Threads = p.Threads
+	// 修复（V3.0 bug）：旧配置文件里 Threads 可能缺失或被写成 0，
+	// 直接赋值会让"并发线程数=0"静默生效（startWorkers 的 wg.Add(0) 一个请求都不发）。
+	// 这里对 0/负数回落到默认值。
+	if p.Threads > 0 {
+		cfg.Threads = p.Threads
+	}
 	cfg.CourseType = p.CourseType
 	cfg.CourseName = p.CourseName
 	cfg.TeacherName = p.TeacherName
@@ -111,6 +116,14 @@ func LoadConfig() (*Config, error) {
 	cfg.MinCredit = p.MinCredit
 	if p.Categories != nil {
 		cfg.Categories = p.Categories
+	}
+
+	// 归一化可容错字段：
+	//   - 旧版本把中文标签直接存进 course_type，归一化后即可被 Match()/查询正确识别
+	//   - NodeURL 为空（旧配置）时回落到默认节点
+	cfg.Normalize()
+	if cfg.NodeURL == "" {
+		cfg.NodeURL = NewConfig().NodeURL
 	}
 
 	// 还原密码

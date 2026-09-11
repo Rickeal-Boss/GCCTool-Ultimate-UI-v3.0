@@ -98,6 +98,9 @@ type Robber struct {
 	emptyFilteredWarned int // "筛选全不命中"已提示次数
 	emptyFullCounter    int // "全部满员"日志节流计数
 
+	// categoryLogged 是否已提示过课程分类的生效情况（只提示一次，避免刷屏）
+	categoryLogged bool
+
 	// 课程信息保存（用于手动接管）
 	lastCourseList *model.CourseList
 	lastMatched    []*model.Course
@@ -131,6 +134,10 @@ func (r *Robber) Start(cfg *model.Config) error {
 	r.emptyNoCourseStreak = 0
 	r.emptyFilteredWarned = 0
 	r.emptyFullCounter = 0
+	// 清空上一次任务残留的课程快照，避免"手动接管"面板显示过期数据
+	r.lastCourseList = nil
+	r.lastMatched = nil
+	r.categoryLogged = false
 	r.wg = &sync.WaitGroup{} // 新任务使用全新的 WaitGroup
 
 	// 重置熔断器和退避（新任务从干净状态开始）
@@ -571,6 +578,36 @@ func (r *Robber) onCoursesAvailable() {
 	r.mu.Unlock()
 }
 
+// logCategoryMatchOnce 首次拿到页面分类选项后，提示一次分类筛选的生效情况
+//
+// 背景（V3.0 的静默失效）：UI 收集了 9 个课程分类复选框存入 cfg.Categories，
+// 但查询逻辑从未使用它们 —— 用户勾了"体育类"没有任何效果，且毫无提示。
+// 现在分类会被映射为页面上真实存在的 kcgs_list 取值；无法映射的会明确告警。
+func (r *Robber) logCategoryMatchOnce() {
+	if len(r.config.Categories) == 0 {
+		return
+	}
+
+	r.mu.Lock()
+	if r.categoryLogged {
+		r.mu.Unlock()
+		return
+	}
+	r.categoryLogged = true
+	r.mu.Unlock()
+
+	applied, unmatched := r.client.MatchCategories(r.config.Categories)
+	if len(applied) > 0 {
+		r.logger.Info(fmt.Sprintf("✓ 课程分类已生效（%d 项）: %s", len(applied), strings.Join(applied, ", ")))
+	}
+	if len(unmatched) > 0 {
+		r.logger.Warn(fmt.Sprintf(
+			"以下课程分类未能在教务系统页面中找到对应选项，本次未参与筛选：%s（可用浏览器抓包确认 kcgs_list 的真实取值）",
+			strings.Join(unmatched, ", "),
+		))
+	}
+}
+
 // handleEmptyResult 依据空结果成因给出不同的日志级别与重试节奏
 //
 // 返回本轮应等待的时长；返回 0 表示沿用当前档位的抖动延迟（保持极速）。
@@ -654,6 +691,9 @@ func (r *Robber) robCourse(workerID int) error {
 	r.mu.Lock()
 	r.lastCourseList = courseList
 	r.mu.Unlock()
+
+	// 首次拿到页面下发的分类选项后，提示一次"课程分类筛选是否真的生效"
+	r.logCategoryMatchOnce()
 
 	// 0 门课是"业务结果"而非错误：与"接口失败"彻底分开
 	if courseList.Total == 0 {

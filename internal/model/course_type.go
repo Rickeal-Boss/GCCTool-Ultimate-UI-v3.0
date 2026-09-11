@@ -56,12 +56,6 @@ func CourseTypeLabels() []string {
 	return append([]string(nil), courseTypeLabelOrder...)
 }
 
-// IsValidCourseType 判断是否为已知的规范课程类型代码
-func IsValidCourseType(code string) bool {
-	_, ok := courseTypeCodeToLabel[code]
-	return ok
-}
-
 // NormalizeCourseType 把任意输入（中文标签或英文代码）统一为规范代码。
 //
 // 容错行为：

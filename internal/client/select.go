@@ -32,7 +32,13 @@ func (c *Client) SelectCourse(course *model.Course) error {
 		return err
 	}
 
-	return c.parseSelectResult(resp)
+	if err := c.parseSelectResult(resp); err != nil {
+		return err
+	}
+
+	// 选课成功后作废课程列表缓存，避免后续轮询继续使用"选课之前"的旧课表
+	c.InvalidateCourseListCache()
+	return nil
 }
 
 // buildSelectParams 构建选课提交参数
@@ -146,9 +152,16 @@ func (c *Client) QuerySelectedCourse() (*model.CourseList, error) {
 func (c *Client) CancelCourse(course *model.Course) error {
 	cancelURL := c.buildURL(pathCancelCourse) + "?gnmkdm=" + gnmkdmSelect
 
+	// 与 SelectCourse 保持一致：V9 的教学班标识用 do_jxb_id（加密长 ID），
+	// 拿不到时才降级用短 jxb_id。原实现无条件用短 ID，若该接口同样要求长 ID 会失败。
+	jxbID := course.ClassID
+	if course.Extra != nil && course.Extra.DoJxbID != "" {
+		jxbID = course.Extra.DoJxbID
+	}
+
 	params := map[string]string{
 		"kch_id":  course.ID,
-		"jxb_ids": course.ClassID,
+		"jxb_ids": jxbID,
 		"gnmkdm":  gnmkdmSelect,
 	}
 
@@ -157,7 +170,12 @@ func (c *Client) CancelCourse(course *model.Course) error {
 		return err
 	}
 
-	return c.parseSelectResult(resp)
+	if err := c.parseSelectResult(resp); err != nil {
+		return err
+	}
+	// 退课同样改变了可选课表，作废缓存
+	c.InvalidateCourseListCache()
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2,7 +2,9 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ main, master, develop ]
+    # fix：本项目的修复分支也需要自动编译验证，否则推 fix 不会触发构建，
+    # 只能靠 Actions 页面手动 dispatch，容易漏检。
+    branches: [ main, master, develop, fix ]
     tags:
       - 'v*'
   pull_request:

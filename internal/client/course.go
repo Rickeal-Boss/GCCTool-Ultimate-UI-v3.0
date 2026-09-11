@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -21,6 +22,13 @@ import (
 // 另外：解析完选课首页与 Display 页后，会把服务端下发的隐藏参数整体缓存到
 // Client.selectInitParams，供 SelectCourse 回填（见 client.go 的注释说明）。
 func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
+	// 短 TTL 缓存：同一查询条件下的并发轮询复用同一次查询结果，把请求量降低约三个数量级
+	// （详见 client.go 中 listCache 字段的说明）。
+	cacheKey := c.courseListCacheKey(cfg)
+	if cached := c.CachedCourseList(cacheKey); cached != nil {
+		return cached, nil
+	}
+
 	indexURL := c.buildURL(pathSelectIndex) + "?gnmkdm=" + gnmkdmSelect + "&layout=default"
 
 	// 步骤0: 用不跟随重定向的探测请求判断 Session 状态
@@ -98,6 +106,10 @@ func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
 	initParams["kklxdm"] = getCourseTypeCode(cfg.CourseType)
 	c.SetSelectInitParams(initParams)
 
+	// 页面下发的"课程归属/课程类别"选项：用于把 UI 勾选的中文分类
+	// 映射成教务系统真实接受的 kcgs_list 取值（不硬编码任何类别代码）。
+	c.SetCategoryOptions(parseCategoryOptions(indexHTML, displayHTML))
+
 	// 步骤4: 构建课程查询参数
 	postData2 := c.buildCourseQueryParams(initParams, cfg)
 
@@ -109,7 +121,14 @@ func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
 	}
 
 	// 步骤6: 解析课程列表（0 门课属于正常业务结果，不返回 error）
-	return model.ParseCourseList([]byte(resp))
+	list, err := model.ParseCourseList([]byte(resp))
+	if err != nil {
+		// 只缓存成功结果；错误不缓存，避免把一次瞬时的会话/网络故障固化一秒
+		return nil, err
+	}
+	c.CacheCourseList(cacheKey, list)
+	// 返回副本：各 Worker 会写入 course.Extra，不能共享同一批指针
+	return list.Clone(), nil
 }
 
 // parseHiddenInputs 解析 HTML 中所有 hidden input 的 name/value
@@ -158,7 +177,137 @@ func (c *Client) buildCourseQueryParams(baseParams map[string]string, cfg *model
 	params["skbj"] = ""   // 上课班级
 	params["sj"] = ""     // 时间
 
+	// 课程分类（多选）：把 UI 勾选的中文标签映射为页面里真实的 kcgs_list 取值。
+	// 修复（V3.0 bug）：cfg.Categories 此前只被收集、从未参与查询 ——
+	// 用户勾选"体育类"完全没有效果，属于静默失效。
+	if codes := c.categoryCodes(cfg); len(codes) > 0 {
+		params["kcgs_list"] = strings.Join(codes, ",")
+	}
+
 	return params
+}
+
+// courseListCacheKey 生成课程列表缓存的键（只包含影响查询结果的字段）
+func (c *Client) courseListCacheKey(cfg *model.Config) string {
+	labels := make([]string, 0, len(cfg.Categories))
+	for label, on := range cfg.Categories {
+		if on {
+			labels = append(labels, label)
+		}
+	}
+	sort.Strings(labels)
+	return model.NormalizeCourseType(cfg.CourseType) + "|" + strings.Join(labels, ",")
+}
+
+// categoryCodes 把用户勾选的分类标签映射为页面里的选项值
+//
+// 只在页面确实提供了同名选项时才返回，避免向服务端提交臆造的类别代码。
+func (c *Client) categoryCodes(cfg *model.Config) []string {
+	if len(cfg.Categories) == 0 {
+		return nil
+	}
+	opts := c.CategoryOptions()
+	if len(opts) == 0 {
+		return nil
+	}
+	codes := make([]string, 0, len(cfg.Categories))
+	for label, on := range cfg.Categories {
+		if !on {
+			continue
+		}
+		if v, ok := opts[label]; ok && v != "" {
+			codes = append(codes, v)
+		}
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// MatchCategories 检查用户勾选的分类能否在页面选项中匹配
+//
+// 返回值分别是被采纳的标签与未匹配的标签，用于向用户明确说明"哪些分类没生效"，
+// 而不是让筛选条件静默失效。
+func (c *Client) MatchCategories(labels map[string]bool) (applied, unmatched []string) {
+	opts := c.CategoryOptions()
+	for label, on := range labels {
+		if !on {
+			continue
+		}
+		if _, ok := opts[label]; ok {
+			applied = append(applied, label)
+		} else {
+			unmatched = append(unmatched, label)
+		}
+	}
+	sort.Strings(applied)
+	sort.Strings(unmatched)
+	return applied, unmatched
+}
+
+// parseCategoryOptions 从选课页面解析"课程归属 / 课程类别"下拉框，
+// 返回「选项文本 → 选项值」映射。
+//
+// 设计取舍：不对 DOM 名称做硬编码断言（学校部署各不相同），改为按名称关键词匹配
+// （kcgs / kclb / kkgs / category）；选项值优先取 value 属性，缺失时退化为文本。
+// 多页面传入时后者覆盖前者（Display 页通常比首页更完整）。
+func parseCategoryOptions(pages ...string) map[string]string {
+	result := make(map[string]string)
+
+	for _, pageHTML := range pages {
+		if strings.TrimSpace(pageHTML) == "" {
+			continue
+		}
+		doc, err := html.Parse(strings.NewReader(pageHTML))
+		if err != nil {
+			continue
+		}
+
+		var walk func(*html.Node)
+		walk = func(n *html.Node) {
+			if n.Type == html.ElementNode && n.Data == "select" {
+				name := strings.ToLower(attrMap(n.Attr)["name"])
+				if strings.Contains(name, "kcgs") || strings.Contains(name, "kclb") ||
+					strings.Contains(name, "kkgs") || strings.Contains(name, "category") {
+					for opt := n.FirstChild; opt != nil; opt = opt.NextSibling {
+						if opt.Type != html.ElementNode || opt.Data != "option" {
+							continue
+						}
+						text := strings.TrimSpace(nodeText(opt))
+						if text == "" {
+							continue
+						}
+						value := strings.TrimSpace(attrMap(opt.Attr)["value"])
+						if value == "" {
+							value = text
+						}
+						result[text] = value
+					}
+				}
+			}
+			for child := n.FirstChild; child != nil; child = child.NextSibling {
+				walk(child)
+			}
+		}
+		walk(doc)
+	}
+
+	return result
+}
+
+// nodeText 递归收集节点下的全部文本
+func nodeText(n *html.Node) string {
+	var sb strings.Builder
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			sb.WriteString(node.Data)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(n)
+	return sb.String()
 }
 
 // getCourseTypeCode 获取课程类型对应的正方 kklxdm 查询参数
