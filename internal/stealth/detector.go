@@ -118,34 +118,52 @@ var riskRules = []struct {
 //
 // 参数：
 //   - isRobbing: 抢课模式标志
-//     - true: 抢课阶段（只检测账号封禁，其他风险忽略）
+//     - true: 抢课阶段（保留封禁 / Session 失效 / 明确限流三类致命信号）
 //     - false: 登录/等待阶段（完整风控检测）
 //
 // 修正说明（Anti-Fix-Bug）：
 //   - 验证码检测已优化：区分"正常的验证码 HTML 元素"和"真正的验证码触发"
 //   - 登录页 HTML 中包含 `<input name="captcha">` 等元素是正常的，不应触发风控
 //   - 只有明确的"验证码触发提示"（如"请输入验证码才能继续"）才触发风控
-//   - 抢课模式：只检测账号封禁（极速模式，其他风险忽略）
+//   - 抢课模式：保留封禁/Session失效/429 限流，跳过验证码与系统繁忙扫描
 // 若无任何信号，返回 RiskNone。
 func DetectRisk(httpStatus int, responseBody string, isRobbing bool) *RiskSignal {
 	lower := strings.ToLower(responseBody)
 
-	// Speed-Opt + Anti-Fix: 抢课模式只检测账号封禁
+	// 抢课模式：保留"账号封禁 / Session 失效 / 明确限流"三类致命信号
+	//
+	// 修复（V3.0 bug）：原实现抢课模式下只检测账号封禁，其余一律返回 RiskNone，
+	// 于是 429 限流与 Session 失效在开抢后完全收不到信号 —— 恰恰在最需要检测的
+	// 阶段（多线程 × 毫秒级间隔）彻底失明，会一路对着限流继续猛刷。
+	// 现在保留三类必须响应的信号，同时跳过验证码/系统繁忙的正文扫描以维持速度。
 	if isRobbing {
+		// HTTP 429 是最明确的限流信号
+		if httpStatus == 429 {
+			return &RiskSignal{Level: RiskRateLimit, Keyword: "HTTP 429", Message: "服务端明确返回限流状态码"}
+		}
+
+		// 明确的限流文案（只保留误报概率最低的几个）
+		for _, kw := range []string{"操作频繁", "访问过于频繁", "请勿频繁"} {
+			if strings.Contains(lower, kw) {
+				return &RiskSignal{Level: RiskRateLimit, Keyword: kw, Message: "触发频率限制，将进行退避等待"}
+			}
+		}
+
+		// 账号封禁 / Session 失效：复用完整规则表（这两类不处理会直接导致空转或封号）
 		for _, rule := range riskRules {
-			if rule.level == RiskBanned {
-				for _, kw := range rule.keywords {
-					if strings.Contains(lower, strings.ToLower(kw)) {
-						return &RiskSignal{
-							Level:   RiskBanned,
-							Keyword: kw,
-							Message: rule.message,
-						}
+			if rule.level != RiskBanned && rule.level != RiskSessionExpired {
+				continue
+			}
+			for _, kw := range rule.keywords {
+				if strings.Contains(lower, strings.ToLower(kw)) {
+					return &RiskSignal{
+						Level:   rule.level,
+						Keyword: kw,
+						Message: rule.message,
 					}
 				}
 			}
 		}
-		// 抢课模式：只检测账号封禁，其他风险全部忽略
 		return &RiskSignal{Level: RiskNone}
 	}
 

@@ -55,6 +55,12 @@ func (l *Logger) Close() {
 // processLogs 处理日志（单 goroutine 串行消费，避免并发写 UI）
 func (l *Logger) processLogs() {
 	for msg := range l.logChan {
+		// 敏感信息脱敏（学号 / 密码 / token 等）
+		// 修复（V3.0 bug）：sanitizeLog 定义了 76 行却从未被任何地方调用，
+		// 导致 README 宣称的"隐私与安全链路"实际是断开的 —— 日志直接原样上屏。
+		// msg 是 range 的副本，就地修改不会影响发送方。
+		msg.message = sanitizeLog(msg.message)
+
 		// UI 文本：无 ANSI 转义码（widget.Label 不渲染转义，会显示为乱码）
 		uiText := l.formatLogUI(msg)
 		l.ui.AppendLog(uiText)

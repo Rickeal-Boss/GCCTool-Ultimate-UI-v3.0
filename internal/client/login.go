@@ -53,7 +53,8 @@ const (
 	pathSelectSubmit = "/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html"
 
 	// 已选课程查询
-	pathSelectedCourses = "/xsxk/zzxkyzb_cxYxkAndKc.html"
+	// 用户实测抓包路径：/xsxk/zzxkyzb_cxZzxkYzbChoosed.html?gnmkdm=N253512
+	pathSelectedCourses = "/xsxk/zzxkyzb_cxZzxkYzbChoosed.html"
 
 	// 退课
 	pathCancelCourse = "/xsxk/zzxkyzb_tkZzxkYzb.html"
@@ -484,15 +485,24 @@ func (c *Client) checkLoginStatus() error {
 
 	lowerBody := strings.ToLower(body)
 
-	// 成功标志1：URL 路径特征（广州商学院正方系统特有）
-	// index_initMenu.html 是登录成功后的主页
-	// xsxk/ 是选课系统路径
+	// ── 失败标志（必须最先判定）──────────────────────────────────────────────
+	// 修复（V3.0 bug）：原实现把 "xtgl" 列为"已登录"的成功标志，但登录页面的
+	// form action 与静态资源路径里必然包含 /xtgl/ —— 于是"密码输错被重定向回登录页"
+	// 也会命中成功标志并 return nil，登录校验形同虚设。
+	// 现在先判定登录表单，确认不是登录页之后才去看成功标志。
+	hasLoginPath := strings.Contains(lowerBody, "login_slogin")
+	hasPasswordField := strings.Contains(lowerBody, `type="password"`) || strings.Contains(lowerBody, `type='password'`)
+	if hasLoginPath && hasPasswordField {
+		return fmt.Errorf("登录失败：被重定向到登录页，请检查账号或密码")
+	}
+
+	// ── 成功标志1：URL 路径特征（广州商学院正方系统特有）────────────────────
+	// index_initMenu.html 是登录成功后的主页；/xsxk/ 是选课系统路径。
+	// 注意：不再使用 "xtgl"（登录页也含此片段）与过于宽泛的 "zzxkyzb"。
 	successPathIndicators := []string{
-		"index_initmenu",     // 主页菜单初始化
-		"xsxk",               // 选课系统路径
-		"zzxkyzb",            // 自主选课相关
-		"cxzyxk",             // 查询专业选课
-		"xtgl",               // 系统管理（已登录）
+		"index_initmenu", // 主页菜单初始化
+		"xsxk/",          // 选课系统路径
+		"cxzyxk",         // 查询专业选课
 	}
 
 	for _, indicator := range successPathIndicators {
@@ -501,17 +511,14 @@ func (c *Client) checkLoginStatus() error {
 		}
 	}
 
-	// 成功标志2：页面内容特征（已登录用户才有）
+	// ── 成功标志2：已登录专属元素 ─────────────────────────────────────────────
+	// 比 V3.0 的"选课/课程/学期"等泛词可靠（错误页也常包含这些词）。
 	successContentIndicators := []string{
-		"选课",             // 选课相关
-		"课程",             // 课程相关
-		"学期",             // 学期信息
-		"学年",             // 学年信息
-		"个人信息",         // 个人信息
-		"退出",             // 退出按钮/链接
-		"修改密码",         // 修改密码链接
-		"当前用户",         // 当前用户显示
-		"欢迎",             // 欢迎信息
+		"退出登录", // 退出按钮
+		"退出系统",
+		"个人中心",
+		"当前用户", // 当前用户显示
+		"修改密码", // 修改密码链接
 	}
 
 	// 如果包含成功标志，说明 Session 有效
@@ -519,16 +526,6 @@ func (c *Client) checkLoginStatus() error {
 		if strings.Contains(lowerBody, indicator) {
 			return nil // Session 有效
 		}
-	}
-
-	// 失败标志1：明确的登录页特征（不仅是包含字符串，而是完整的登录表单）
-	// 检查是否同时包含：login_slogin + 密码输入框 + 登录按钮
-	hasLoginPath := strings.Contains(lowerBody, "login_slogin")
-	hasPasswordField := strings.Contains(lowerBody, `type="password"`) || strings.Contains(lowerBody, `type='password'`)
-	hasLoginButton := strings.Contains(lowerBody, "登录") || strings.Contains(lowerBody, "login") || strings.Contains(lowerBody, "登入")
-
-	if hasLoginPath && hasPasswordField && hasLoginButton {
-		return fmt.Errorf("登录失败：被重定向到登录页，请检查账号或密码")
 	}
 
 	// 失败标志2：明确的 Session 失效提示

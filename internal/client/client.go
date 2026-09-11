@@ -2,13 +2,16 @@ package client
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0/internal/stealth"
@@ -71,6 +74,17 @@ type Client struct {
 	// true: 抢课阶段（极速模式 + 只检测账号封禁）
 	// false: 登录/等待阶段（正常模式 + 完整风控检测）
 	isRobbing bool
+
+	// mu 保护 selectInitParams
+	mu sync.Mutex
+	// selectInitParams 缓存从"选课首页 / Display 页"提取到的服务端初始化参数
+	// （xkkz_id、rwlx、rlkz、sxbj、cxbj、qz、xklc、xkxnm、xkxqm 等）。
+	//
+	// 正方 V9 的选课提交接口要求带上这些页面下发的隐藏参数；V3.0 只提交了
+	// kch_id/kcmc/kklxdm/gnmkdm/jxb_ids 五个字段，其余全为空，服务端大概率直接拒绝。
+	// 这里把页面原样下发的参数整体缓存，提交时原样回填，避免硬编码字段名单
+	// （学校换版本时无需改代码）。
+	selectInitParams map[string]string
 }
 
 // NewClient 创建客户端
@@ -155,22 +169,64 @@ func (c *Client) BackoffStrategy() *stealth.BackoffStrategy {
 	return c.backoffStrategy
 }
 
-// readResponseBody 读取 HTTP 响应体，自动处理 gzip 压缩
+// readResponseBody 读取 HTTP 响应体，自动处理 gzip / deflate 压缩
+//
+// 修复点（V3.0 bug）：请求头声明了 `Accept-Encoding: gzip, deflate`
+// （见 stealth.InjectHeaders），但原实现只处理 gzip；一旦服务端选择 deflate，
+// 拿到的就是压缩后的二进制乱码，随后 JSON 解析失败 —— 表现为莫名其妙的
+// "获取课程表失败"，且与服务端真实返回完全对不上号。
+//
+// 实现说明：先把原始字节整体读出再解压，避免"解压器构造失败时 body 已被消费"
+// 导致无法回退。deflate 有两种常见封装（zlib 带 2 字节头 / 裸 deflate），
+// 依次尝试，全部失败则原样返回。
 func readResponseBody(resp *http.Response) ([]byte, error) {
-	var reader io.Reader = resp.Body
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
 
-	switch strings.ToLower(resp.Header.Get("Content-Encoding")) {
-	case "gzip":
-		gr, err := gzip.NewReader(resp.Body)
+	switch encoding {
+	case "gzip", "x-gzip":
+		raw, err := io.ReadAll(resp.Body)
 		if err != nil {
-			reader = resp.Body
-		} else {
-			defer gr.Close()
-			reader = gr
+			return nil, err
 		}
+		if len(raw) == 0 {
+			return raw, nil
+		}
+		gr, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return raw, nil // 声明了 gzip 但实际没压缩，原样返回
+		}
+		defer gr.Close()
+		if out, err := io.ReadAll(gr); err == nil {
+			return out, nil
+		}
+		return raw, nil
+
+	case "deflate":
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		if len(raw) == 0 {
+			return raw, nil
+		}
+		// 1) zlib 封装（RFC 1950，最常见）
+		if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
+			defer zr.Close()
+			if out, err := io.ReadAll(zr); err == nil {
+				return out, nil
+			}
+		}
+		// 2) 裸 deflate（RFC 1951，部分中间件/代理会这样返回）
+		fr := flate.NewReader(bytes.NewReader(raw))
+		defer fr.Close()
+		if out, err := io.ReadAll(fr); err == nil {
+			return out, nil
+		}
+		// 3) 声明了 deflate 但实际未压缩
+		return raw, nil
 	}
 
-	return io.ReadAll(reader)
+	return io.ReadAll(resp.Body)
 }
 
 // doGet GET请求（集成反检测引擎 + 熔断器检查）
@@ -363,6 +419,24 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
 	}
 
+	// 修复（V3.0 bug）：原 doPost 缺少状态码校验，服务端返回 500/404 的错误页
+	// 会被当作正常响应继续往下解析（doGet 与 doPostWithReferer 都有这段校验，
+	// 只有选课/查课表真正依赖的 doPost 漏了）。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, rawURL)
+	}
+
 	c.circuitBreaker.RecordSuccess()
 	stealth.Global.Record(stealth.RequestRecord{
 		Timestamp:  time.Now(),
@@ -470,6 +544,22 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 			UA:         req.Header.Get("User-Agent"),
 		})
 		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
+	}
+
+	// 修复（V3.0 bug）：补齐状态码校验（与 doGet / doPost 保持一致）
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodPost,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskNone,
+			Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, rawURL)
 	}
 
 	c.circuitBreaker.RecordSuccess()
@@ -636,6 +726,34 @@ func (c *Client) CheckSessionAlive() error {
 // DelayProfile 返回当前延迟档位（供 robber 读取）
 func (c *Client) DelayProfile() stealth.DelayProfile {
 	return c.delayProfile
+}
+
+// SetSelectInitParams 缓存选课初始化参数（由 GetClassList 在解析选课首页/Display 页后调用）
+//
+// 内部做一次深拷贝，避免调用方后续修改 map 影响缓存。
+func (c *Client) SetSelectInitParams(params map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cp := make(map[string]string, len(params))
+	for k, v := range params {
+		cp[k] = v
+	}
+	c.selectInitParams = cp
+}
+
+// SelectInitParams 返回选课初始化参数的副本（供选课提交回填）
+//
+// 返回副本而非内部 map，避免多 Worker 并发提交时相互踩踏。
+func (c *Client) SelectInitParams() map[string]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cp := make(map[string]string, len(c.selectInitParams))
+	for k, v := range c.selectInitParams {
+		cp[k] = v
+	}
+	return cp
 }
 
 // buildURL 构建完整URL

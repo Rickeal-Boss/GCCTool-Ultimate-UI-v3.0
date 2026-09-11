@@ -27,17 +27,25 @@ echo ""
 echo "[3/4] 编译程序..."
 LDFLAGS="-s -w -X main.version=$VERSION -X main.buildTime=$BUILD_TIME"
 
+# 输出文件名按宿主平台决定扩展名。
+# 修复：原实现硬编码 ".exe"，在 Linux/macOS 上会产出一个名字带 .exe 的可执行文件，
+# 与 CI（release.yml 的 matrix）产物命名不一致，用户容易误判下载错包。
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) OUT="gcc_helper_v${VERSION}.exe" ;;
+    *)                    OUT="gcc_helper_v${VERSION}" ;;
+esac
+
 # -tags prod：关闭控制台日志输出，避免学号/选课信息泄露到标准输出
-go build -v -tags prod -ldflags="$LDFLAGS" -o "gcc_helper_v${VERSION}.exe" main.go
+go build -v -tags prod -ldflags="$LDFLAGS" -o "$OUT" main.go
 
 echo ""
 echo "[4/4] 构建完成！"
 
 # 显示文件信息
-if [ -f "gcc_helper_v${VERSION}.exe" ]; then
-    SIZE=$(du -h "gcc_helper_v${VERSION}.exe" | cut -f1)
+if [ -f "$OUT" ]; then
+    SIZE=$(du -h "$OUT" | cut -f1)
     echo "----------------------------------------"
-    echo "文件名: gcc_helper_v${VERSION}.exe"
+    echo "文件名: $OUT"
     echo "文件大小: $SIZE"
     echo "版本: $VERSION"
     echo "构建时间: $BUILD_TIME"

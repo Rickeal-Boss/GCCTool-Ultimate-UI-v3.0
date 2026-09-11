@@ -103,7 +103,10 @@ func (a *App) initComponents() {
 	}
 
 	// ── 课程类型 ──────────────────────────────────────────────────────────
-	a.ui.CourseTypeRadio.Options = []string{"普通网课", "体育课", "普通课"}
+	// 展示层用中文标签；GetConfig 会统一归一化为 online/pe/normal 规范代码。
+	// 修复（V3.0 bug）：原实现把中文标签直接当作业务值，导致 Match() 的类型过滤
+	// 与查询类别码同时失效（选体育课也会去抢网课，且查询恒为 kklxdm=10）。
+	a.ui.CourseTypeRadio.Options = model.CourseTypeLabels()
 
 	// ── 分类复选框 ────────────────────────────────────────────────────────
 	labels := []string{
@@ -428,10 +431,22 @@ func (a *App) buildButtonBar() fyne.CanvasObject {
 // ── 事件处理 ──────────────────────────────────────────────────────────────────
 
 func (a *App) onStartClicked() {
-	cfg := a.ui.GetConfig()
+	cfg, err := a.ui.GetConfig()
+	if err != nil {
+		// 输入框填写非法（如线程数写了非数字）时明确报错，
+		// 而不是静默回退成 0 导致"启动后一个请求都不发"
+		dialog.ShowError(err, a.window)
+		return
+	}
 
 	if cfg.Username == "" || cfg.Password == "" {
 		dialog.ShowError(fmt.Errorf("请输入账号和密码"), a.window)
+		return
+	}
+
+	// 范围校验（线程数 0、时间越界等都是会直接导致任务空转的配置）
+	if err := cfg.Validate(); err != nil {
+		dialog.ShowError(err, a.window)
 		return
 	}
 
@@ -488,15 +503,13 @@ func (a *App) doStartRobbery(cfg *model.Config) {
 
 	go func() {
 		defer func() {
-			// 密码原地清零（防止堆栈/内存残留）
-			if len(cfg.Password) > 0 {
-				b := []byte(cfg.Password)
-				for i := range b {
-					b[i] = 0
-				}
-				cfg.Password = ""
-			}
-
+			// 说明：这里原本有一段"密码原地清零"代码，已删除。两个原因：
+			//  1. 它本身是无效的 —— []byte(s) 会复制字符串，清零的只是副本，
+			//     原 string 不可变，根本没有被清除。
+			//  2. 它有严重副作用 —— cfg 与 robber.config 是同一个指针（r.config = cfg），
+			//     Start() 登录完就返回，defer 随即把 cfg.Password 置空；几小时后
+			//     Session 失效触发重新登录时密码已是空串，重登必然失败，账号还有被锁风险。
+			// 真正要在内存里保护密码需要全链路改用 []byte，属独立改造，不在本次范围。
 			if r := recover(); r != nil {
 				a.logger.Error(fmt.Sprintf("抢课任务异常: %v", r))
 				a.resetUIAfterStop()
@@ -559,24 +572,48 @@ func (a *App) refreshCourseList() {
 		dialog.ShowInformation("提示", "请先启动抢课任务以获取课程列表", a.window)
 		return
 	}
-
-	courses := a.robber.GetLastMatchedCourses()
-	if courses == nil || len(courses) == 0 {
-		// 尝试获取全部课程列表
-		list := a.robber.GetLastCourseList()
-		if list != nil && len(list.Items) > 0 {
-			a.ui.CourseData = list.Items
-			a.ui.CourseList.Refresh()
-			dialog.ShowInformation("提示", fmt.Sprintf("已加载 %d 门课程", len(list.Items)), a.window)
-		} else {
-			dialog.ShowInformation("提示", "暂无课程数据，请等待抢课任务获取课程列表", a.window)
-		}
+	if a.ui.CourseList == nil {
 		return
 	}
 
-	a.ui.CourseData = courses
+	list := a.robber.GetLastCourseList()
+	matched := a.robber.GetLastMatchedCourses()
+
+	// 展示优先级：命中筛选的课程 > 服务端返回的全部课程
+	items := matched
+	if len(items) == 0 && list != nil {
+		items = list.Items
+	}
+
+	total := 0
+	if list != nil {
+		total = list.Total
+	}
+
+	// 修复（V3.0 bug）：原实现只在 len(list.Items) > 0 时才赋值 + Refresh，
+	// 于是在"服务端返回 0 门课"这个最需要看清的场景下，界面仍显示上一次的旧课程。
+	a.ui.CourseData = items
 	a.ui.CourseList.Refresh()
-	dialog.ShowInformation("提示", fmt.Sprintf("已加载 %d 门匹配的课程", len(courses)), a.window)
+
+	switch {
+	case list == nil:
+		dialog.ShowInformation("提示", "暂无课程数据，请等待抢课任务获取课程列表", a.window)
+	case len(items) == 0:
+		a.setStatus("● 本轮查询到 0 门课程", color.NRGBA{R: 0xFF, G: 0xD0, B: 0x40, A: 0xFF})
+		dialog.ShowInformation("提示",
+			"服务端本次返回 0 门课程。\n\n"+
+				"这通常是正常业务结果，而不是故障：\n"+
+				"  · 本类别（如网课）本轮可能未排课\n"+
+				"  · 或当前课程类型 / 分类 / 筛选条件与教务系统不匹配\n\n"+
+				"建议：切换课程类型或分类，或先到教务系统网页端手动搜索确认。",
+			a.window)
+	default:
+		a.setStatus(fmt.Sprintf("● 已获取 %d 门（命中 %d 门）", total, len(matched)),
+			color.NRGBA{R: 0x4A, G: 0xDE, B: 0x80, A: 0xFF})
+		dialog.ShowInformation("提示",
+			fmt.Sprintf("已加载 %d 门课程\n（服务端共返回 %d 门，其中命中筛选条件 %d 门）", len(items), total, len(matched)),
+			a.window)
+	}
 }
 
 // exportCourseInfo 导出课程信息到剪贴板
@@ -752,7 +789,7 @@ func setDefaults(ui *model.UIComponents) {
 	ui.MinuteEntry.SetText("30")
 	ui.AdvanceEntry.SetText("1")
 	ui.ThreadEntry.SetText("10")
-	ui.CourseTypeRadio.SetSelected("普通网课")
+	ui.CourseTypeRadio.SetSelected(model.CourseTypeLabel(model.CourseTypeOnline))
 	ui.NodeSelect.SetSelectedIndex(0)
 	ui.MinCreditEntry.SetText("2")
 }

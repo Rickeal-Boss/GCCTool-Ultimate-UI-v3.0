@@ -2,6 +2,7 @@ package robber
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -31,6 +32,15 @@ const (
 
 	// sessionKeepaliveInterval Session 保活间隔（每隔此时间访问一次首页）
 	sessionKeepaliveInterval = 4 * time.Minute
+
+	// emptyLogEvery 连续空结果的日志节流间隔（每 N 次空结果才打印一次）
+	emptyLogEvery = 100
+	// emptySlowDownAfter 连续"服务端 0 门"超过此次数后，把重试节奏从快速降到慢速
+	emptySlowDownAfter = 10
+	// emptyNoCourseHintAt 连续"服务端 0 门"达到此次数时给出一次醒目提示（即"该放手了"的度）
+	emptyNoCourseHintAt = 600
+	// emptyWarningMaxRepeats "筛选条件全不命中"的警告最多重复次数（大概率是配置错误）
+	emptyWarningMaxRepeats = 3
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,6 +70,10 @@ const (
 //  4. Session 保活：等待期间每 4 分钟轻量 GET 一次，防止 Session 超时
 //  5. 详细的风控告警日志：用户可以看到实时的反检测状态
 //  6. 课程信息保存：抢课失败时保存已获取的课程信息，供用户手动接管
+//
+// V3.2 修复：
+//  7. 空结果语义拆分（0 门课 / 未命中筛选 / 全满员）并分别给节奏，见 EmptyResultError
+//  8. WaitGroup 不再被并发重置（原实现在 Stop() 等待期间重新赋值，存在数据竞争）
 type Robber struct {
 	client *client.Client
 	logger *logger.Logger
@@ -67,13 +81,22 @@ type Robber struct {
 
 	running bool
 	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	// wg 每次任务创建新的 WaitGroup 实例并保持指针稳定。
+	// 原实现在 startWorkers 里直接给字段赋新值，而 Stop() 在释放锁之后才 Wait，
+	// 二者并发会触发 data race，极端情况下 panic: WaitGroup is reused before
+	// previous Wait has returned。
+	wg *sync.WaitGroup
 
 	// 统计计数器
 	successCount int
 	failCount    int
 	reloginCount int
 	mu           sync.Mutex
+
+	// 空结果计数（用于区分"没排课"与"满员"的重试节奏）
+	emptyNoCourseStreak int // 连续"服务端 0 门"次数
+	emptyFilteredWarned int // "筛选全不命中"已提示次数
+	emptyFullCounter    int // "全部满员"日志节流计数
 
 	// 课程信息保存（用于手动接管）
 	lastCourseList *model.CourseList
@@ -105,6 +128,10 @@ func (r *Robber) Start(cfg *model.Config) error {
 	r.successCount = 0
 	r.failCount = 0
 	r.reloginCount = 0
+	r.emptyNoCourseStreak = 0
+	r.emptyFilteredWarned = 0
+	r.emptyFullCounter = 0
+	r.wg = &sync.WaitGroup{} // 新任务使用全新的 WaitGroup
 
 	// 重置熔断器和退避（新任务从干净状态开始）
 	r.client.CircuitBreaker().Reset()
@@ -121,7 +148,9 @@ func (r *Robber) Start(cfg *model.Config) error {
 	// 同步登录
 	r.logger.Info("正在登录教务系统...")
 	if err := r.client.Login(cfg); err != nil {
+		r.mu.Lock()
 		r.running = false
+		r.mu.Unlock()
 		cancel()
 		return fmt.Errorf("登录失败: %w", err)
 	}
@@ -129,8 +158,14 @@ func (r *Robber) Start(cfg *model.Config) error {
 
 	// 后台调度 goroutine
 	go func() {
-		startTime := r.calculateStartTime()
-		r.logger.Info(fmt.Sprintf("计划开始时间: %s", startTime.Format("15:04:05")))
+		startTime, rolled := r.calculateStartTime()
+		if rolled {
+			r.logger.Warn(fmt.Sprintf(
+				"设定的开始时间（%02d:%02d，提前 %d 分钟）已过，已自动顺延到明天同一时刻；如需立即开始请把时间改到当前之后",
+				r.config.Hour, r.config.Minute, r.config.Advance,
+			))
+		}
+		r.logger.Info(fmt.Sprintf("计划开始时间: %s", startTime.Format("2006-01-02 15:04:05")))
 
 		// 等待开始时间（期间保活 Session）
 		r.waitWithKeepalive(ctx, startTime)
@@ -149,6 +184,20 @@ func (r *Robber) Start(cfg *model.Config) error {
 	return nil
 }
 
+// markStopped 标记任务已停止并广播取消信号（线程安全）
+//
+// 原实现直接在 worker 里写 r.running = false 并调用 r.cancel()，
+// 与 Stop() 形成无保护的并发读写。
+func (r *Robber) markStopped() {
+	r.mu.Lock()
+	r.running = false
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // Stop 停止抢课
 func (r *Robber) Stop() {
 	// Anti-Fix-Bug: 添加 nil 检查，防止崩溃
@@ -161,16 +210,20 @@ func (r *Robber) Stop() {
 		r.mu.Unlock()
 		return
 	}
-
-	r.logger.Info("正在停止抢课...")
 	r.running = false
-
 	if r.cancel != nil {
 		r.cancel()
 	}
+	// 在持锁状态下取出本次任务的 WaitGroup 实例，之后在锁外等待，
+	// 避免与 startWorkers 的赋值竞争。
+	wg := r.wg
 	r.mu.Unlock()
 
-	r.wg.Wait()
+	r.logger.Info("正在停止抢课...")
+
+	if wg != nil {
+		wg.Wait()
+	}
 
 	r.mu.Lock()
 	sc, fc, rc := r.successCount, r.failCount, r.reloginCount
@@ -200,7 +253,10 @@ func (r *Robber) IsRunning() bool {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // calculateStartTime 计算目标开始时间（含提前量）
-func (r *Robber) calculateStartTime() time.Time {
+//
+// 第二个返回值表示是否因"设定时间已过"而顺延到了第二天 —— 原实现静默 +24h，
+// 用户会以为程序卡住，因此上层需要据此给出明确提示。
+func (r *Robber) calculateStartTime() (time.Time, bool) {
 	now := time.Now()
 	target := time.Date(
 		now.Year(), now.Month(), now.Day(),
@@ -210,9 +266,9 @@ func (r *Robber) calculateStartTime() time.Time {
 	target = target.Add(-time.Duration(r.config.Advance) * time.Minute)
 
 	if target.Before(now) {
-		target = target.Add(24 * time.Hour)
+		return target.Add(24 * time.Hour), true
 	}
-	return target
+	return target, false
 }
 
 // waitWithKeepalive 等待到目标时间，期间定期保活 Session
@@ -240,7 +296,7 @@ func (r *Robber) waitWithKeepalive(ctx context.Context, target time.Time) {
 				return
 			case <-time.After(remaining):
 				// Speed-Opt + Anti-Fix: 进入抢课模式（极速模式 + 精准风控）
-				r.logger.Info("🚀 开始抢课！进入极速模式（毫秒级延迟 + 只检测账号封禁）")
+				r.logger.Info("🚀 开始抢课！进入极速模式（毫秒级延迟 + 精准风控）")
 				r.client.SetRobbingMode(true)
 				return
 			}
@@ -286,21 +342,39 @@ func (r *Robber) doKeepalive(ctx context.Context) {
 //
 // Speed-Opt: 使用 WaitGroup 并发启动所有 Worker，确保同时启动
 // 避免逐个启动导致的 50~100ms 启动延迟
+//
+// Anti-Fix-Bug: 不再在此处重置 r.wg（原实现给字段赋新值，与 Stop() 的 Wait 竞争）。
 func (r *Robber) startWorkers(ctx context.Context) {
-	r.logger.Info(fmt.Sprintf("🚀 并发启动 %d 个 Worker...", r.config.Threads))
+	threads := r.config.Threads
 
-	// Anti-Fix-Bug: 重置 WaitGroup，确保 Stop() 可以正确等待
-	r.wg = sync.WaitGroup{}
-	r.wg.Add(r.config.Threads)
+	r.mu.Lock()
+	wg := r.wg
+	r.mu.Unlock()
 
-	for i := 0; i < r.config.Threads; i++ {
+	if wg == nil {
+		wg = &sync.WaitGroup{}
+	}
+
+	r.logger.Info(fmt.Sprintf("🚀 并发启动 %d 个 Worker...", threads))
+
+	// 启动前把实际提交的选课初始化参数名打印一次，便于对照浏览器抓包核对
+	// 是否缺少关键开关参数（如 xkkz_id）——这是"选课提交被拒"最难排查的一环。
+	if keys := r.client.SelectInitParamKeys(); len(keys) > 0 {
+		r.logger.Info(fmt.Sprintf("选课初始化参数（%d 个）: %s", len(keys), strings.Join(keys, ", ")))
+	} else {
+		r.logger.Warn("未获取到任何选课初始化参数（xkkz_id 等），选课提交很可能被服务端拒绝；" +
+			"请确认当前处于选课开放时段，必要时用浏览器抓包核对提交参数")
+	}
+
+	wg.Add(threads)
+	for i := 0; i < threads; i++ {
 		go func(id int) {
-			defer r.wg.Done()
+			defer wg.Done()
 			r.worker(ctx, id)
 		}(i + 1)
 	}
 
-	r.wg.Wait()
+	wg.Wait()
 	r.logger.Info("所有 Worker 已完成")
 
 	// Speed-Opt + Anti-Fix: 抢课结束，关闭抢课模式
@@ -310,16 +384,16 @@ func (r *Robber) startWorkers(ctx context.Context) {
 	}
 }
 
-// worker 抢课 Worker（V3.1 风控感知版）
+// worker 抢课 Worker（V3.2 风控感知 + 空结果区分版）
 //
 // 核心风控处理逻辑：
 //  1. [风控-停止]  → 立即结束此 Worker，广播停止信号
 //  2. [风控-会话]  → 触发重新登录，最多重试 maxReLoginAttempts 次
 //  3. [风控-限流]  → 指数退避等待后重试
-//  4. 正常失败     → 短暂延迟后继续重试
+//  4. 空结果       → 按成因区分节奏（见 EmptyResultError）
+//  5. 待重试(-1)   → 短延迟重试
+//  6. 正常失败     → 短暂延迟后继续重试
 func (r *Robber) worker(ctx context.Context, id int) {
-	// Note: r.wg.Done() 在 startWorkers 中调用，这里不需要
-
 	r.logger.Info(fmt.Sprintf("Worker %d 启动", id))
 
 	state := wsNormal
@@ -366,18 +440,23 @@ func (r *Robber) worker(ctx context.Context, id int) {
 		default:
 		}
 
+		// overrideDelay > 0 时覆盖本轮延迟（用于空结果/待重试等特殊节奏）
+		var overrideDelay time.Duration
+
 		err := r.robCourse(id)
 
 		if err == nil {
 			r.mu.Lock()
 			r.successCount++
+			r.emptyNoCourseStreak = 0
+			r.emptyFilteredWarned = 0
+			r.emptyFullCounter = 0
 			r.mu.Unlock()
 			backoffSec = 0
 			state = wsNormal
 			// Speed-Opt + Anti-Fix: 选课成功后立即返回（关闭抢课模式）
 			r.logger.Success("✅ 选课成功！停止所有 Worker")
-			r.running = false
-			r.cancel() // 广播停止信号给所有 Worker
+			r.markStopped()
 			return
 		}
 
@@ -386,12 +465,13 @@ func (r *Robber) worker(ctx context.Context, id int) {
 		r.failCount++
 		r.mu.Unlock()
 
+		var emptyErr *EmptyResultError
+
 		switch {
 		case isBannedError(errMsg):
 			// 账号封禁：立刻停止所有 Worker
 			r.logger.Error(fmt.Sprintf("🚨 Worker %d 检测到账号封禁信号！立即停止所有任务！原因: %v", id, err))
-			r.running = false
-			r.cancel() // 广播停止信号给所有 Worker
+			r.markStopped()
 			return
 
 		case isSessionError(errMsg):
@@ -437,22 +517,29 @@ func (r *Robber) worker(ctx context.Context, id int) {
 			}
 			r.logger.Warn(fmt.Sprintf("Worker %d 触发限流，退避 %ds: %v", id, backoffSec, err))
 
+		case errors.Is(err, client.ErrSelectRetry):
+			// 服务端要求稍后重试（flag = -1），短延迟后再来，不计入"配置错误"类告警
+			backoffSec = 0
+			state = wsNormal
+			r.logger.Info(fmt.Sprintf("Worker %d 服务端要求重试: %v", id, err))
+			overrideDelay = 300 * time.Millisecond
+
+		case errors.As(err, &emptyErr):
+			// 三种"没课"状态给完全不同的节奏
+			overrideDelay = r.handleEmptyResult(id, emptyErr)
+
 		default:
 			// 普通失败：重置退避，短暂等待后继续
 			backoffSec = 0
 			state = wsNormal
 			// 选课未开放/系统维护属于正常等待状态，用 Info 级别而非 Error
-			isNotOpen := strings.Contains(errMsg, "选课未开放") || strings.Contains(errMsg, "系统维护")
-			if isNotOpen {
+			if strings.Contains(errMsg, "选课未开放") || strings.Contains(errMsg, "系统维护") {
 				// Anti-Fix-Bug: 选课未开放时强制等待 300ms，避免极速模式下毫秒级狂刷日志
-				// 选课开放的瞬间延迟仅 300ms，影响可忽略不计
 				r.logger.Info(fmt.Sprintf("Worker %d: %v，等待重试...", id, err))
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(300 * time.Millisecond):
-				}
-				continue
+				overrideDelay = 300 * time.Millisecond
+			} else if errors.Is(err, errRoundNoSelection) {
+				// 有候选课程但都没选上：一轮正常结果，别按错误刷屏
+				r.logger.Info(fmt.Sprintf("Worker %d: %v", id, err))
 			} else {
 				r.logger.Error(fmt.Sprintf("Worker %d 抢课失败: %v", id, err))
 			}
@@ -460,7 +547,10 @@ func (r *Robber) worker(ctx context.Context, id int) {
 
 		// 每轮结束后随机延迟（反检测：避免机械均匀间隔）
 		_ = state // 未来可根据 state 进一步差异化延迟
-		delay := stealth.JitteredDelay(r.client.DelayProfile())
+		delay := overrideDelay
+		if delay <= 0 {
+			delay = stealth.JitteredDelay(r.client.DelayProfile())
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -470,10 +560,90 @@ func (r *Robber) worker(ctx context.Context, id int) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 空结果处理
+// ─────────────────────────────────────────────────────────────────────────────
+
+// onCoursesAvailable 服务端本轮确实返回了课程（Total > 0），重置"0 门课"连击
+func (r *Robber) onCoursesAvailable() {
+	r.mu.Lock()
+	r.emptyNoCourseStreak = 0
+	r.emptyFullCounter = 0
+	r.mu.Unlock()
+}
+
+// handleEmptyResult 依据空结果成因给出不同的日志级别与重试节奏
+//
+// 返回本轮应等待的时长；返回 0 表示沿用当前档位的抖动延迟（保持极速）。
+//
+//	| 成因                 | 级别 | 节奏                     | 用户该做什么        |
+//	| EmptyNoCourseAtServer| Info | 前 10 轮 500ms，之后 3s  | 切换类别/清空筛选   |
+//	| EmptyFilteredOut     | Warn | 3s，最多提示 3 次        | 检查筛选条件        |
+//	| EmptyAllFull         | Info | 保持极速（随时有人退课） | 继续挂着等          |
+func (r *Robber) handleEmptyResult(workerID int, e *EmptyResultError) time.Duration {
+	switch e.Kind {
+	case EmptyNoCourseAtServer:
+		r.mu.Lock()
+		r.emptyNoCourseStreak++
+		streak := r.emptyNoCourseStreak
+		r.mu.Unlock()
+
+		// 日志节流：首次 + 每 emptyLogEvery 次打印一次，避免多线程毫秒级刷屏
+		if streak == 1 || streak%emptyLogEvery == 0 {
+			r.logger.Info(fmt.Sprintf("Worker %d: %v（连续第 %d 轮）", workerID, e, streak))
+		}
+		// 到了该"放手"的度：给一次醒目提示
+		if streak == emptyNoCourseHintAt {
+			r.logger.Warn("⚠ 已连续多轮查询到 0 门课程：教务系统很可能本轮未开放该类别（如网课）。" +
+				"建议切换课程类型/分类，或先到教务系统网页端手动搜索确认，再清空过严的筛选条件。")
+		}
+
+		// 前若干轮快速重试（可能是选课刚开放），之后明显放慢，避免对着 0 门课空刷
+		if streak <= emptySlowDownAfter {
+			return 500 * time.Millisecond
+		}
+		return 3 * time.Second
+
+	case EmptyFilteredOut:
+		// 有课但条件全不命中：大概率是筛选条件/类别码配置错，用 Warn 且最多提示 3 次
+		r.mu.Lock()
+		r.emptyFilteredWarned++
+		warned := r.emptyFilteredWarned
+		r.mu.Unlock()
+
+		if warned <= emptyWarningMaxRepeats {
+			r.logger.Warn(fmt.Sprintf("Worker %d: %v", workerID, e))
+			if warned == emptyWarningMaxRepeats {
+				r.logger.Warn(fmt.Sprintf("（该提示最多重复 %d 次，后续不再刷屏；请修正筛选条件后重新启动）", emptyWarningMaxRepeats))
+			}
+		}
+		return 3 * time.Second
+
+	default: // EmptyAllFull
+		// 全部满员：保持原有节奏死等（随时可能有人退课），仅低频提示
+		r.mu.Lock()
+		r.emptyFullCounter++
+		n := r.emptyFullCounter
+		r.mu.Unlock()
+
+		if n == 1 || n%emptyLogEvery == 0 {
+			r.logger.Info(fmt.Sprintf("Worker %d: %v", workerID, e))
+		}
+		return 0
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 抢课逻辑
 // ─────────────────────────────────────────────────────────────────────────────
 
 // robCourse 执行一轮抢课逻辑
+//
+// 返回值语义：
+//   - nil                     → 选课成功
+//   - *EmptyResultError       → 本轮无课可提交（区分三种成因）
+//   - client.ErrSelectRetry   → 服务端要求稍后重试
+//   - errRoundNoSelection     → 有候选课程但都没选上（正常轮询）
+//   - 其他                     → 请求/解析层面的错误
 func (r *Robber) robCourse(workerID int) error {
 	courseList, err := r.client.GetClassList(r.config)
 	if err != nil {
@@ -485,9 +655,15 @@ func (r *Robber) robCourse(workerID int) error {
 	r.lastCourseList = courseList
 	r.mu.Unlock()
 
+	// 0 门课是"业务结果"而非错误：与"接口失败"彻底分开
+	if courseList.Total == 0 {
+		return &EmptyResultError{Kind: EmptyNoCourseAtServer}
+	}
+	r.onCoursesAvailable()
+
 	matched := r.filterCourses(courseList)
 	if len(matched) == 0 {
-		return fmt.Errorf("没有符合条件的课程")
+		return &EmptyResultError{Kind: EmptyFilteredOut, Total: courseList.Total}
 	}
 
 	// 保存匹配的课程列表
@@ -495,23 +671,39 @@ func (r *Robber) robCourse(workerID int) error {
 	r.lastMatched = matched
 	r.mu.Unlock()
 
+	attemptable := make([]*model.Course, 0, len(matched))
 	for _, course := range matched {
 		if course.IsFull() {
 			r.logger.Warn(fmt.Sprintf("课程已满: %s", course.Name))
 			continue
 		}
+		attemptable = append(attemptable, course)
+	}
+	if len(attemptable) == 0 {
+		return &EmptyResultError{Kind: EmptyAllFull, Total: courseList.Total, Matched: len(matched)}
+	}
 
+	for _, course := range attemptable {
 		if course.Extra == nil {
 			extra, err := r.client.GetClassInfo(course.ID)
 			if err != nil {
-				r.logger.Warn(fmt.Sprintf("获取课程详情失败: %s - %v", course.Name, err))
-				continue
+				// 修复（V3.0 bug）：详情拿不到不再直接 continue 放弃这门课。
+				// 详情接口挂掉不该让整轮选课全废——降级用短 jxb_id 试一次。
+				r.logger.Warn(fmt.Sprintf("获取课程详情失败，降级使用短 jxb_id 重试: %s - %v", course.Name, err))
+				course.Extra = &model.CourseExtra{}
+			} else {
+				course.Extra = extra
+				if extra.DoJxbID == "" {
+					r.logger.Warn(fmt.Sprintf("课程详情未返回 do_jxb_id，降级使用短 jxb_id: %s", course.Name))
+				}
 			}
-			course.Extra = extra
 		}
 
 		r.logger.Info(fmt.Sprintf("Worker %d 尝试选课: %s (%s)", workerID, course.Name, course.Teacher))
 		if err := r.client.SelectCourse(course); err != nil {
+			if errors.Is(err, client.ErrSelectRetry) {
+				return err // 交由 worker 走"待重试"节奏
+			}
 			r.logger.Warn(fmt.Sprintf("选课失败: %s - %v", course.Name, err))
 			continue
 		}
@@ -520,7 +712,7 @@ func (r *Robber) robCourse(workerID int) error {
 		return nil
 	}
 
-	return fmt.Errorf("本轮未能成功选到课程")
+	return errRoundNoSelection
 }
 
 // GetLastCourseList 获取最后一次获取的课程列表（用于手动接管）

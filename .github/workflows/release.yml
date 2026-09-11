@@ -125,7 +125,6 @@ jobs:
           mkdir -p "$ARCHIVE_DIR"
           cp "${{ matrix.output }}"       "$ARCHIVE_DIR/"
           cp "${{ matrix.output_debug }}" "$ARCHIVE_DIR/"
-          cp data.json "$ARCHIVE_DIR/"
           cp README.md "$ARCHIVE_DIR/" || true
 
           ARCHIVE_NAME="gcc_helper_${{ matrix.goos }}_${{ matrix.arch }}"

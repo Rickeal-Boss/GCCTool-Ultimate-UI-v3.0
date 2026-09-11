@@ -17,6 +17,9 @@ import (
 // 关键修复：先用不跟随重定向的方式探测选课首页，
 // 明确区分 "Session失效(302跳转)" 和 "选课未开放(200正常页面)"，
 // 避免系统维护/未开放页面被误判为 Session 失效。
+//
+// 另外：解析完选课首页与 Display 页后，会把服务端下发的隐藏参数整体缓存到
+// Client.selectInitParams，供 SelectCourse 回填（见 client.go 的注释说明）。
 func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
 	indexURL := c.buildURL(pathSelectIndex) + "?gnmkdm=" + gnmkdmSelect + "&layout=default"
 
@@ -75,23 +78,37 @@ func (c *Client) GetClassList(cfg *model.Config) (*model.CourseList, error) {
 	postData1["gnmkdm"] = gnmkdmSelect
 
 	// 步骤2: 获取选课参数
+	// Display 页会下发真正的选课开关参数（xkkz_id 等），这些参数在 SelectCourse
+	// 提交时必须原样带上，因此这里不能只把响应丢掉，要解析出来缓存。
 	displayURL := c.buildURL(pathSelectDisplay) + "?gnmkdm=" + gnmkdmSelect
-	_, err = c.doPost(displayURL, postData1)
+	displayHTML, err := c.doPost(displayURL, postData1)
 	if err != nil {
 		return nil, err
 	}
 
-	// 步骤3: 构建课程查询参数
-	postData2 := c.buildCourseQueryParams(postData1, cfg)
+	// 步骤3: 合并"选课首页 + Display 页"下发的隐藏参数并缓存
+	initParams := make(map[string]string, len(postData1)+16)
+	for k, v := range postData1 {
+		initParams[k] = v
+	}
+	for k, v := range c.parseHiddenInputs(displayHTML) {
+		initParams[k] = v
+	}
+	// 记录本次实际使用的类别码，便于排查"学校改了类别代码导致查不到课"
+	initParams["kklxdm"] = getCourseTypeCode(cfg.CourseType)
+	c.SetSelectInitParams(initParams)
 
-	// 步骤4: 获取课程列表JSON
+	// 步骤4: 构建课程查询参数
+	postData2 := c.buildCourseQueryParams(initParams, cfg)
+
+	// 步骤5: 获取课程列表JSON
 	partURL := c.buildURL(pathCourseList) + "?gnmkdm=" + gnmkdmSelect
 	resp, err := c.doPost(partURL, postData2)
 	if err != nil {
 		return nil, err
 	}
 
-	// 步骤5: 解析课程列表
+	// 步骤6: 解析课程列表（0 门课属于正常业务结果，不返回 error）
 	return model.ParseCourseList([]byte(resp))
 }
 
@@ -134,7 +151,7 @@ func (c *Client) buildCourseQueryParams(baseParams map[string]string, cfg *model
 		params[k] = v
 	}
 
-	// 设置查询参数
+	// 设置查询参数（kklxdm 取归一化后的类别码，避免中文标签导致查询类别错误）
 	params["kklxdm"] = getCourseTypeCode(cfg.CourseType)
 	params["kch_id"] = "" // 如果指定课程号
 	params["jxb_id"] = "" // 如果指定教学班
@@ -144,26 +161,30 @@ func (c *Client) buildCourseQueryParams(baseParams map[string]string, cfg *model
 	return params
 }
 
-// getCourseTypeCode 获取课程类型代码
+// getCourseTypeCode 获取课程类型对应的正方 kklxdm 查询参数
+//
+// 统一走 model 层映射：V3.0 里 client 与 model.Course.Match() 各写了一份
+// 类型→代码的对应关系，UI 传中文时两边同时失效。现在只有一个来源。
 func getCourseTypeCode(courseType string) string {
-	codes := map[string]string{
-		"online": "10", // 网课
-		"pe":     "20", // 体育课
-		"normal": "30", // 普通课
-	}
-
-	if code, ok := codes[courseType]; ok {
-		return code
-	}
-	return "10" // 默认网课
+	return model.CourseTypeCodeKklxdm(courseType)
 }
 
 // GetClassInfo 获取课程详情（上课时间、do_jxb_id 加密 ID 等）
+//
+// 修复点（V3.0 bug）：原实现固定按 JSON 对象解析，而同一接口在不同正方部署下
+// 可能返回数组（Efarxs 那份"实际抢到过课"的实现就是按 []map 解析的）。形态不符时
+// Unmarshal 直接失败，robber 侧会 `continue` 跳过该课 —— 结果是整轮选课颗粒无收。
+//
+// 现在改为"对象 / 数组"双形态兼容，并对 JSON key 做归一化（忽略大小写与下划线），
+// 取不到详情时由调用方降级用短 jxb_id 重试，而不是直接放弃这门课。
 func (c *Client) GetClassInfo(courseID string) (*model.CourseExtra, error) {
-	params := map[string]string{
-		"kch_id":  courseID,
-		"gnmkdm": gnmkdmSelect,
+	// 详情接口同样需要选课初始化参数，合并缓存后再提交
+	params := c.SelectInitParams()
+	if params == nil {
+		params = make(map[string]string, 2)
 	}
+	params["kch_id"] = courseID
+	params["gnmkdm"] = gnmkdmSelect
 
 	infoURL := c.buildURL(pathCourseInfo) + "?gnmkdm=" + gnmkdmSelect
 	resp, err := c.doPost(infoURL, params)
@@ -171,24 +192,91 @@ func (c *Client) GetClassInfo(courseID string) (*model.CourseExtra, error) {
 		return nil, err
 	}
 
-	// 解析响应（正方 V9 的课程详情包含 do_jxb_id 加密长 ID）
-	var result struct {
-		Kcmc    string `json:"kcmc"`      // 课程名称
-		Jsm     string `json:"jsm"`       // 老师姓名
-		Jsmc    string `json:"jsmc"`      // 教室名称
-		Sksj    string `json:"sksj"`      // 上课时间
-		Kcbj    string `json:"kcbj"`      // 课程备注
-		DoJxbID string `json:"do_jxb_id"` // 正方 V9：加密长 ID，选课必须用此值
+	extra := parseCourseExtra(resp)
+	if extra == nil {
+		return nil, fmt.Errorf("解析课程详情失败：响应既不是对象也不是数组（前120字符: %s）", previewOf(resp, 120))
+	}
+	return extra, nil
+}
+
+// normalizeJSONKey 归一化 JSON key：转小写并去掉下划线
+// 用于兼容 do_jxb_id / doJxbId / dojxbid 等不同写法
+func normalizeJSONKey(k string) string {
+	k = strings.ToLower(k)
+	return strings.ReplaceAll(k, "_", "")
+}
+
+// extraFromMap 从一个 JSON 对象中提取课程详情字段
+func extraFromMap(obj map[string]interface{}) *model.CourseExtra {
+	if len(obj) == 0 {
+		return nil
 	}
 
-	if err := json.Unmarshal([]byte(resp), &result); err != nil {
-		return nil, fmt.Errorf("解析课程详情失败: %w", err)
+	norm := make(map[string]interface{}, len(obj))
+	for k, v := range obj {
+		norm[normalizeJSONKey(k)] = v
+	}
+
+	get := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := norm[normalizeJSONKey(k)]; ok {
+				if s, ok := model.ToString(v); ok && s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+
+	doJxb := get("do_jxb_id", "doJxbId")
+	kcmc := get("kcmc")
+	if doJxb == "" && kcmc == "" {
+		return nil
 	}
 
 	return &model.CourseExtra{
-		ClassInfo: result.Jsmc,
-		ExamInfo:  result.Sksj,
-		Remark:    result.Kcbj,
-		DoJxbID:   result.DoJxbID,
-	}, nil
+		ClassInfo: get("jsmc"),
+		ExamInfo:  get("sksj"),
+		Remark:    get("kcbj"),
+		DoJxbID:   doJxb,
+	}
+}
+
+// parseCourseExtra 解析课程详情响应，兼容数组与对象两种形态
+func parseCourseExtra(resp string) *model.CourseExtra {
+	trimmed := strings.TrimSpace(resp)
+	if trimmed == "" {
+		return nil
+	}
+
+	// 形态 A：数组 —— 取第一个能解析出内容的对象元素
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []interface{}
+		if err := json.Unmarshal([]byte(trimmed), &arr); err == nil {
+			for _, el := range arr {
+				if m, ok := el.(map[string]interface{}); ok {
+					if extra := extraFromMap(m); extra != nil {
+						return extra
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	// 形态 B：对象
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		return nil
+	}
+	return extraFromMap(obj)
+}
+
+// previewOf 截取字符串前 n 个字符，用于错误信息展示
+func previewOf(s string, n int) string {
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= n {
+		return string(runes)
+	}
+	return string(runes[:n]) + "..."
 }
