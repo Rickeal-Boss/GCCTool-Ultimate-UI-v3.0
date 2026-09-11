@@ -327,7 +327,13 @@ func (c *Client) doGet(rawURL string) (string, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.circuitBreaker.RecordFailure()
+		// 只有 5xx / 429 才计入熔断失败。
+		// 4xx 是请求本身的问题（参数、路径、权限），与服务端过载无关；若一并计入，
+		// 参数写错时几轮内就会把熔断器打开，把"参数问题"伪装成"网络故障"，
+		// 并让整个抢课窗口停滞在冷却期里。
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			c.circuitBreaker.RecordFailure()
+		}
 		stealth.Global.Record(stealth.RequestRecord{
 			Timestamp:  time.Now(),
 			URL:        rawURL,
@@ -450,7 +456,13 @@ func (c *Client) doPost(rawURL string, data map[string]string) (string, error) {
 	// 会被当作正常响应继续往下解析（doGet 与 doPostWithReferer 都有这段校验，
 	// 只有选课/查课表真正依赖的 doPost 漏了）。
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.circuitBreaker.RecordFailure()
+		// 只有 5xx / 429 才计入熔断失败。
+		// 4xx 是请求本身的问题（参数、路径、权限），与服务端过载无关；若一并计入，
+		// 参数写错时几轮内就会把熔断器打开，把"参数问题"伪装成"网络故障"，
+		// 并让整个抢课窗口停滞在冷却期里。
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			c.circuitBreaker.RecordFailure()
+		}
 		stealth.Global.Record(stealth.RequestRecord{
 			Timestamp:  time.Now(),
 			URL:        rawURL,
@@ -581,7 +593,13 @@ func (c *Client) doPostWithBytes(rawURL string, data []byte, contentType string)
 
 	// 修复（V3.0 bug）：补齐状态码校验（与 doGet / doPost 保持一致）
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.circuitBreaker.RecordFailure()
+		// 只有 5xx / 429 才计入熔断失败。
+		// 4xx 是请求本身的问题（参数、路径、权限），与服务端过载无关；若一并计入，
+		// 参数写错时几轮内就会把熔断器打开，把"参数问题"伪装成"网络故障"，
+		// 并让整个抢课窗口停滞在冷却期里。
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			c.circuitBreaker.RecordFailure()
+		}
 		stealth.Global.Record(stealth.RequestRecord{
 			Timestamp:  time.Now(),
 			URL:        rawURL,
@@ -714,7 +732,13 @@ func (c *Client) doPostWithReferer(rawURL string, data map[string]string, refere
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.circuitBreaker.RecordFailure()
+		// 只有 5xx / 429 才计入熔断失败。
+		// 4xx 是请求本身的问题（参数、路径、权限），与服务端过载无关；若一并计入，
+		// 参数写错时几轮内就会把熔断器打开，把"参数问题"伪装成"网络故障"，
+		// 并让整个抢课窗口停滞在冷却期里。
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			c.circuitBreaker.RecordFailure()
+		}
 		stealth.Global.Record(stealth.RequestRecord{
 			Timestamp:  time.Now(),
 			URL:        rawURL,

@@ -475,6 +475,16 @@ func (r *Robber) worker(ctx context.Context, id int) {
 		var emptyErr *EmptyResultError
 
 		switch {
+		case isCaptchaError(errMsg):
+			// 验证码：需要人工介入，而且**不是**账号封禁。
+			// 修复（V3.0 bug）：客户端把 RiskBanned 与 RiskCaptcha 都归到 "[风控-停止]"，
+			// robber 又只按该前缀判定"账号封禁"，于是触发验证码时提示"账号已被封禁"，
+			// 用户会误以为账号出事而白白放弃抢课窗口。
+			r.logger.Error(fmt.Sprintf(
+				"🔒 Worker %d 教务系统触发验证码，自动化已停止。请到教务系统网页端手动完成验证后再重新启动任务（这不是账号封禁）", id))
+			r.markStopped()
+			return
+
 		case isBannedError(errMsg):
 			// 账号封禁：立刻停止所有 Worker
 			r.logger.Error(fmt.Sprintf("🚨 Worker %d 检测到账号封禁信号！立即停止所有任务！原因: %v", id, err))
@@ -830,6 +840,16 @@ func (r *Robber) tryRelogin(ctx context.Context, attempt int) error {
 // ─────────────────────────────────────────────────────────────────────────────
 // 错误分类辅助
 // ─────────────────────────────────────────────────────────────────────────────
+
+// isCaptchaError 判断是否为验证码触发
+//
+// 必须在 isBannedError 之前判断：两类信号在客户端都返回 "[风控-停止]" 前缀，
+// 但处置方式完全不同（验证码=人工介入后重试；封禁=立即放弃）。
+func isCaptchaError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(msg, "验证码") || strings.Contains(lower, "captcha") ||
+		strings.Contains(lower, "imagecode")
+}
 
 // isBannedError 判断是否为账号封禁错误
 func isBannedError(msg string) bool {

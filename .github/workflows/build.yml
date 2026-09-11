@@ -42,6 +42,14 @@ jobs:
           go mod download
           go mod verify
 
+      - name: Run tests
+        # 核心逻辑（课程类型映射、选课结果解析、空结果语义、日志脱敏、课表缓存）
+        # 都有单元测试，先把问题挡在构建之前。
+        # go test ./... 同时会对 internal/ui 与根包做一次编译，等价于全量类型检查。
+        env:
+          CGO_ENABLED: 1
+        run: go test ./...
+
       - name: Build Windows EXE
         env:
           CGO_ENABLED: 1
