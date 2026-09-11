@@ -1,10 +1,11 @@
 module github.com/Rickeal-Boss/GCCTool-Ultimate-UI-v3.0
 
-go 1.22
+go 1.23.0
 
 require (
 	fyne.io/fyne/v2 v2.5.3
 	github.com/atotto/clipboard v0.1.4
+	golang.org/x/net v0.38.0
 )
 
 require (
@@ -23,7 +24,7 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/jeandeaual/go-locale v0.0.0-20240223122105-ce5225dcaa49 // indirect
-	github.com/jsummers/gobmp v0.0.0-20151104160322-e2ba15ffa76e // indirect
+	github.com/jsummers/gobmp v0.0.0-20151104160322-e2ba15ffa76a // indirect
 	github.com/nicksnyder/go-i18n/v2 v2.4.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rymdport/portal v0.3.0 // indirect
@@ -33,8 +34,7 @@ require (
 	github.com/yuin/goldmark v1.7.1 // indirect
 	golang.org/x/image v0.18.0 // indirect
 	golang.org/x/mobile v0.0.0-20231127183840-76ac6878050a // indirect
-	golang.org/x/net v0.25.0 // indirect
-	golang.org/x/sys v0.20.0 // indirect
-	golang.org/x/text v0.16.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

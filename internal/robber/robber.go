@@ -93,6 +93,19 @@ type Robber struct {
 	reloginCount int
 	mu           sync.Mutex
 
+	// ── 重登录防循环（V3.3，对应 issue#1 的"session 失效循环"）──────────────
+	//
+	// 两个机制：
+	//  1. reloginGate：并发 Worker 不各自提交登录（多个线程同时打登录接口 =
+	//     多次密码提交 = 直接触发风控/验证码），改为串行 + 30s 结果复用窗口。
+	//  2. lastReloginSuccessAt：Worker 在重登录"成功"后会把本地失败计数清零，
+	//     若重登录本身是假成功（如旧版登录校验误报），计数永远清零，
+	//     maxReLoginAttempts 形同虚设 → 无限循环。
+	//     修复：短时间内（90s）连续的"重登录成功"不再清零计数，
+	//     让 3 次上限在循环场景必然触发并停止 Worker。
+	reloginGateMu         sync.Mutex
+	lastReloginSuccessAt  time.Time
+
 	// 空结果计数（用于区分"没排课"与"满员"的重试节奏）
 	emptyNoCourseStreak int // 连续"服务端 0 门"次数
 	emptyFilteredWarned int // "筛选全不命中"已提示次数
@@ -139,6 +152,11 @@ func (r *Robber) Start(cfg *model.Config) error {
 	r.lastMatched = nil
 	r.categoryLogged = false
 	r.wg = &sync.WaitGroup{} // 新任务使用全新的 WaitGroup
+
+	// 新任务重置重登录栅栏状态（上一任务遗留的节流窗口不影响新任务）
+	r.reloginGateMu.Lock()
+	r.lastReloginSuccessAt = time.Time{}
+	r.reloginGateMu.Unlock()
 
 	// 重置熔断器和退避（新任务从干净状态开始）
 	r.client.CircuitBreaker().Reset()
@@ -520,7 +538,18 @@ func (r *Robber) worker(ctx context.Context, id int) {
 				}
 			} else {
 				r.logger.Success(fmt.Sprintf("Worker %d 重新登录成功", id))
-				reloginAttempts = 0
+				// V3.3（issue#1）：短时间内的"重登录成功"不清零失败计数。
+				// 若重登录本身是假成功（如旧版登录校验误报），清零会让
+				// maxReLoginAttempts 形同虚设 → 无限循环。
+				// 正常场景（几小时后 session 过期）距上次远超 90s，不受影响。
+				r.reloginGateMu.Lock()
+				if time.Since(r.lastReloginSuccessAt) > 90*time.Second {
+					reloginAttempts = 0
+				} else {
+					r.logger.Warn(fmt.Sprintf("Worker %d 检测到短时间内反复会话失效，本 Worker 的重试计数不清零（第 %d/%d 次）", id, reloginAttempts, maxReLoginAttempts))
+				}
+				r.lastReloginSuccessAt = time.Now()
+				r.reloginGateMu.Unlock()
 				state = wsNormal
 			}
 
@@ -828,9 +857,21 @@ func (r *Robber) tryRelogin(ctx context.Context, attempt int) error {
 	case <-time.After(time.Duration(waitSec) * time.Second):
 	}
 
+	// V3.3（issue#1）：重登录共享栅栏。
+	// 多个 Worker 同时会话失效时，若各自调用 Login，等于在几秒内
+	// 反复提交账号密码 —— 这是触发风控/验证码的最快路径。
+	// 栅栏内串行执行；30s 内有 Worker 刚成功登录，其余 Worker 直接复用其会话。
+	r.reloginGateMu.Lock()
+	defer r.reloginGateMu.Unlock()
+	if time.Since(r.lastReloginSuccessAt) < 30*time.Second && !r.lastReloginSuccessAt.IsZero() {
+		r.logger.Info("其他线程刚刚完成重新登录，本次复用其会话，不再重复提交登录")
+		return nil
+	}
+
 	if err := r.client.Login(r.config); err != nil {
 		return fmt.Errorf("重新登录失败: %w", err)
 	}
+	r.lastReloginSuccessAt = time.Now()
 
 	// 重置熔断器（重新登录后熔断器也应该复位）
 	r.client.CircuitBreaker().Reset()

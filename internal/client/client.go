@@ -127,10 +127,18 @@ func NewClient(nodeURL string) *Client {
 }
 
 // NewClientWithProxy 创建带代理的客户端
+//
+// Transport 从 http.DefaultTransport 克隆（V3.3 安全加固）：
+// 原实现用 `&http.Transport{}` 零值，会同时丢掉两样东西——
+//   1. ProxyFromEnvironment：用户设置的 HTTP(S)_PROXY 环境变量失效；
+//   2. 默认传输层参数（TLS 握手超时、空闲连接回收、连接数上限等），
+//      零值 Transport 在高频轮询下会积累大量半开连接。
+// 克隆后再叠加显式代理（若用户填写了 Agent），行为与浏览器/系统一致。
+// TLS 证书验证始终开启（无任何 InsecureSkipVerify）。
 func NewClientWithProxy(nodeURL, agentURL string) *Client {
 	jar, _ := cookiejar.New(nil)
 
-	transport := &http.Transport{}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if agentURL != "" {
 		if proxyURL, err := url.Parse(agentURL); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
@@ -324,6 +332,24 @@ func (c *Client) doGet(rawURL string) (string, error) {
 			UA:         req.Header.Get("User-Agent"),
 		})
 		return bodyStr, fmt.Errorf("[风控-会话] %s (触发词: %s)", signal.Message, signal.Keyword)
+	}
+
+	// 会话失效的强信号（与 doPost 对齐）：GET 一个正常页面却被 302 到登录页，
+	// 说明 Session 已失效。此前只有 doPost 有此检查，页面链路（选课首页等）
+	// 的会话失效只能表现为"解析失败"或被关键词误报掩盖。
+	if looksLikeLoginPage(bodyStr) {
+		c.circuitBreaker.RecordFailure()
+		stealth.Global.Record(stealth.RequestRecord{
+			Timestamp:  time.Now(),
+			URL:        rawURL,
+			Method:     http.MethodGet,
+			StatusCode: resp.StatusCode,
+			Latency:    time.Since(reqStart),
+			RiskLevel:  stealth.RiskSessionExpired,
+			Error:      "接口返回了登录页",
+			UA:         req.Header.Get("User-Agent"),
+		})
+		return bodyStr, fmt.Errorf("[风控-会话] 会话已失效（接口返回了登录页），即将尝试重新登录")
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -880,6 +906,17 @@ func (c *Client) InvalidateCourseListCache() {
 	c.listCacheMu.Lock()
 	c.listCache = nil
 	c.listCacheMu.Unlock()
+}
+
+// ClearSessionBoundState 清空与旧会话绑定的全部缓存
+//
+// 登录成功后调用（含自动重登录）：选课初始化参数（xkkz_id 等）与课程列表
+// 都是上一个会话拉取的。若重登录后继续沿用，服务端可能因会话不匹配拒绝
+// 请求，客户端再把失败误判为会话失效 → 再次重登录 → 循环（issue#1 的
+// 放大器之一）。
+func (c *Client) ClearSessionBoundState() {
+	c.SetSelectInitParams(nil)
+	c.InvalidateCourseListCache()
 }
 
 // looksLikeLoginPage 判断响应体是否为教务系统登录页

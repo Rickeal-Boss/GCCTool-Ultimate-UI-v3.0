@@ -450,33 +450,75 @@ func (a *App) onStartClicked() {
 		return
 	}
 
-	// HTTP 内网节点安全警告
+	// ── 安全检查链（V3.3：明文代理 + 明文节点依次确认）──────────────────────
+	//
+	// 1. 明文 HTTP 代理：全部流量（学号、选课操作、登录会话 Cookie）
+	//    都会经过第三方代理服务器且以明文形式可见。
+	// 2. 明文 HTTP 内网节点：密码本体有 RSA 加密保护，
+	//    但学号与 Session Cookie 明文传输，同网段可被 ARP 欺骗截获。
+	//
 	// ⚠️ 注意：cfg.NodeURL 存的是节点显示名（如"节点6（内网）"），不是真实 URL，
 	// 必须先通过 client.NodeURLFromName 翻译成真实 Base URL 再判断 http:// 前缀，
 	// 否则判断永远不成立（节点名不以 "http://" 开头）。
-	realURL := client.NodeURLFromName(cfg.NodeURL)
-	if len(realURL) >= 7 && realURL[:7] == "http://" {
-		dialog.ShowConfirm(
-			"⚠️ 不安全的网络连接",
-			"当前选择的节点使用 HTTP（明文）传输。\n\n"+
-				"在校园网/内网环境下，同一网段的设备可以通过\n"+
-				"ARP 欺骗截获您的 Session Cookie，\n"+
-				"等同于账号被盗。\n\n"+
-				"建议切换到 HTTPS 节点（节点1-5）。\n"+
-				"内网节点（节点6-13）仅在校园网内可用。\n"+
-				"确定仍要使用当前内网节点继续？",
-			func(ok bool) {
-				if !ok {
-					return
-				}
-				a.doStartRobbery(cfg)
-			},
-			a.window,
-		)
-		return
+	a.confirmSecurityChecksThenStart(cfg)
+}
+
+// securityCheck 一项需要用户确认的安全风险
+type securityCheck struct {
+	title   string
+	message string
+}
+
+// collectSecurityChecks 收集当前配置下需要弹窗确认的安全风险
+func (a *App) collectSecurityChecks(cfg *model.Config) []securityCheck {
+	var checks []securityCheck
+
+	if strings.HasPrefix(strings.ToLower(cfg.Agent), "http://") {
+		checks = append(checks, securityCheck{
+			title: "⚠️ 不安全的代理配置",
+			message: "当前配置了 HTTP（明文）代理。\n\n" +
+				"您的全部流量都会经过该代理服务器，\n" +
+				"包括学号、选课操作与登录会话 Cookie，\n" +
+				"代理方可以看到并篡改这些内容。\n\n" +
+				"建议改用 socks5:// 或 https:// 代理。\n" +
+				"确定仍要使用当前代理继续？",
+		})
 	}
 
-	a.doStartRobbery(cfg)
+	if realURL := client.NodeURLFromName(cfg.NodeURL); strings.HasPrefix(realURL, "http://") {
+		checks = append(checks, securityCheck{
+			title: "⚠️ 不安全的网络连接",
+			message: "当前选择的节点使用 HTTP（明文）传输。\n\n" +
+				"在校园网/内网环境下，同一网段的设备可以通过\n" +
+				"ARP 欺骗截获您的 Session Cookie，\n" +
+				"等同于账号被盗。\n\n" +
+				"建议切换到 HTTPS 节点（节点1-5）。\n" +
+				"内网节点（节点6-13）仅在校园网内可用。\n" +
+				"确定仍要使用当前内网节点继续？",
+		})
+	}
+
+	return checks
+}
+
+// confirmSecurityChecksThenStart 逐项弹窗确认安全风险，全部通过后启动任务
+func (a *App) confirmSecurityChecksThenStart(cfg *model.Config) {
+	checks := a.collectSecurityChecks(cfg)
+	a.confirmChecksRecursively(cfg, checks)
+}
+
+func (a *App) confirmChecksRecursively(cfg *model.Config, checks []securityCheck) {
+	if len(checks) == 0 {
+		a.doStartRobbery(cfg)
+		return
+	}
+	c := checks[0]
+	dialog.ShowConfirm(c.title, c.message, func(ok bool) {
+		if !ok {
+			return
+		}
+		a.confirmChecksRecursively(cfg, checks[1:])
+	}, a.window)
 }
 
 func (a *App) doStartRobbery(cfg *model.Config) {

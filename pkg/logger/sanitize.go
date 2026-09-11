@@ -17,13 +17,23 @@ import (
 // （此前该函数定义了却从未被任何地方调用，链路是断的）。
 // ─────────────────────────────────────────────────────────────────────────────
 
-// credentialPattern 凭据类字段
+// credentialPattern 凭据与会话类字段
 //
 // 处理策略：**整体打码**，不保留任何明文字符。
 // 修复：原实现对所有敏感字段一律"保留前 2 位 + 后 2 位"，
 // 对密码/token 这类凭据来说等于仍然泄露 4 个字符，短口令甚至可能被大幅还原。
+//
+// 覆盖范围（V3.3 安全加固）：
+//   - 密码类：password / passwd / pwd / mm（正方登录表单的密码字段名）
+//   - 令牌类：token / csrftoken / csrf / secret / auth / key
+//     （注意 csrftoken 必须整词列出：\b 词边界使得 "token" 分支
+//       匹配不到 csrftoken 中的内嵌 token）
+//   - 会话类：cookie / session / jsessionid（正方 V9 为 Java 系统，
+//     会话 Cookie 名固定为 JSESSIONID）—— 会话标识泄露等同于账号被劫持，
+//     与密码同级处理
+//   - 中文格式：密码=xxx / 密码: xxx / 口令=xxx
 var credentialPattern = regexp.MustCompile(
-	`(?i)\b(?:password|passwd|pwd|secret|token|auth|key|mm)\s*=\s*[^&\s\]]+`)
+	`(?i)(?:\b(?:password|passwd|pwd|secret|token|csrftoken|csrf|auth|key|mm|cookie|session|jsessionid)\s*=\s*[^&\s\]]+|(?:密码|口令)\s*[=:]\s*[^\s,&\]]+)`)
 
 // identityPatterns 身份类字段
 //
@@ -67,13 +77,13 @@ func maskValue(value string) string {
 func sanitizeLog(message string) string {
 	result := message
 
-	// 1. 凭据类：整体打码
+	// 1. 凭据与会话类：整体打码
 	result = credentialPattern.ReplaceAllStringFunc(result, func(match string) string {
-		eqIdx := strings.Index(match, "=")
-		if eqIdx < 0 {
+		idx := strings.IndexAny(match, "=:")
+		if idx < 0 {
 			return match
 		}
-		return match[:eqIdx+1] + fullMaskPlaceholder
+		return match[:idx+1] + fullMaskPlaceholder
 	})
 
 	// 2. 身份类：保留首尾

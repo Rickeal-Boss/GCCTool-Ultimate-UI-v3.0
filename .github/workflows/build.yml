@@ -23,7 +23,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          # x/net v0.38.0（修复 CVE-2024-45338 等）要求 go >= 1.23
+          go-version: '1.23'
           cache: false
 
       - name: Cache Go modules

@@ -22,6 +22,27 @@ func TestSanitizeLog_CredentialsFullyMasked(t *testing.T) {
 	}
 }
 
+// V3.3 补漏：csrftoken（\b 词边界导致原正则匹配不到内嵌 token）、
+// 会话标识（cookie/session，泄露等同账号被劫持）、中文「密码:」格式。
+func TestSanitizeLog_CsrfCookieSessionAndChinese(t *testing.T) {
+	cases := []struct {
+		in     string
+		secret string
+	}{
+		{"表单携带 csrftoken=a1b2c3d4e5", "a1b2c3d4e5"},
+		{"Cookie: JSESSIONID=9F2E8A71B3", "9F2E8A71B3"},
+		{"session=abc123def456 已建立", "abc123def456"},
+		{"登录参数 密码: MyPlainPW", "MyPlainPW"},
+		{"密码=S3cret!23 提交", "S3cret!23"},
+	}
+	for _, c := range cases {
+		out := sanitizeLog(c.in)
+		if strings.Contains(out, c.secret) {
+			t.Errorf("敏感值 %q 不得残留明文: %s", c.secret, out)
+		}
+	}
+}
+
 func TestSanitizeLog_IdentityPartiallyMasked(t *testing.T) {
 	out := sanitizeLog("yhm=20210001")
 	if strings.Contains(out, "20210001") {

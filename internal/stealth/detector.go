@@ -68,13 +68,18 @@ var riskRules = []struct {
 	{
 		level: RiskSessionExpired,
 		keywords: []string{
-			// Anti-Fix-Bug: 移除误报关键词，只保留真正的 Session 失效提示
-			// 移除 "login_slogin"（登录页面的 URL 路径，不是 Session 失效的提示）
-			// 移除 `type="password"`（登录页面的密码输入框，不是 Session 失效的提示）
-			// 广州商学院教务系统登录页: https://jwxt.gcc.edu.cn/xtgl/login_slogin.html
+			// Anti-Fix-Bug: 只保留服务端渲染的失效提示文案（正常登录后的页面不含这些词）
+			// V3.3（issue#1 复盘）移除三个必然误报的词：
+			//   - "重新登录"：登录后页面的导航栏常见"重新登录"链接文案，每轮轮询必命中
+			//   - "loginout"：正方导航栏"退出"链接 href 为 /xtgl/loginout_loginout.html，
+			//     任何完整 HTML 页面（选课首页等）都含此片段 → 每次拉列表必判会话失效
+			//     → 触发重登录循环（issue#1 的主因）
+			//   - "未登录"：选课页前端 JS 源码（变量名/提示分支）可能包含
+			// 真正的会话失效由两处确定性信号兜底：
+			//   - AJAX 链路：doPost/doPostWithBytes 的 looksLikeLoginPage（302→登录页）
+			//   - 页面链路：doGet 同样接入 looksLikeLoginPage
 			"请重新登录", "您已超时",
-			"会话已过期", "登录超时", "重新登录",
-			"未登录", "请先登录", "loginout",
+			"会话已过期", "登录超时", "请先登录",
 		},
 		message: "Session 已失效，需要重新登录",
 	},

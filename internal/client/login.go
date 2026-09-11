@@ -124,7 +124,15 @@ func (c *Client) Login(cfg *model.Config) error {
 	}
 
 	// 步骤5：验证登录状态（访问选课首页，成功则 Session 有效）
-	return c.checkLoginStatus()
+	if err := c.checkLoginStatus(); err != nil {
+		return err
+	}
+
+	// 登录成功后清空与旧会话绑定的缓存（选课参数、课程列表）。
+	// 自动重登录场景下，旧会话拉取的参数继续提交会被服务端拒绝，
+	// 客户端再把失败误判为会话失效 → 再次重登录 → 死循环（issue#1）。
+	c.ClearSessionBoundState()
+	return nil
 }
 
 // checkLoginResponse 检查登录响应中是否包含失败标志
