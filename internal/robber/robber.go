@@ -41,6 +41,11 @@ const (
 	emptyNoCourseHintAt = 600
 	// emptyWarningMaxRepeats "筛选条件全不命中"的警告最多重复次数（大概率是配置错误）
 	emptyWarningMaxRepeats = 3
+
+	// maxSubmitPerRound 单轮单 Worker 提交上限。
+	// 依据：提交限速 300ms/次（全局限速）→ 单轮 5 次提交 = 1.5s，
+	// 10 个 Worker 满负荷也就 33 次/秒的提交节奏，远低于服务端限流阈值。
+	maxSubmitPerRound = 5
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,7 +114,11 @@ type Robber struct {
 	// 空结果计数（用于区分"没排课"与"满员"的重试节奏）
 	emptyNoCourseStreak int // 连续"服务端 0 门"次数
 	emptyFilteredWarned int // "筛选全不命中"已提示次数
-	emptyFullCounter    int // "全部满员"日志节流计数
+	emptyFullCounter    int // "全部满员"日志节流计数器
+
+	// roundCursor 候选课程轮转游标：每轮从不同候选开始提交，
+	// 避免排在后面的候选永远抢不到提交名额（配合 maxSubmitPerRound）
+	roundCursor int
 
 	// categoryLogged 是否已提示过课程分类的生效情况（只提示一次，避免刷屏）
 	categoryLogged bool
@@ -563,6 +572,13 @@ func (r *Robber) worker(ctx context.Context, id int) {
 			}
 			r.logger.Warn(fmt.Sprintf("Worker %d 触发限流，退避 %ds: %v", id, backoffSec, err))
 
+		case errors.Is(err, client.ErrQuotaExceeded):
+			// 选课门次已达上限：**不是成功**（曾误判为成功并停止所有 Worker，
+			// 实际一门没选中），重试也无效。明确提示并停止。
+			r.logger.Error(fmt.Sprintf("🚫 Worker %d 已达选课门次上限，本次未选中任何课程（重试无效，已停止）: %v", id, err))
+			r.markStopped()
+			return
+
 		case errors.Is(err, client.ErrSelectRetry):
 			// 服务端要求稍后重试（flag = -1），短延迟后再来，不计入"配置错误"类告警
 			backoffSec = 0
@@ -750,21 +766,32 @@ func (r *Robber) robCourse(workerID int) error {
 	r.lastMatched = matched
 	r.mu.Unlock()
 
-	attemptable := make([]*model.Course, 0, len(matched))
-	for _, course := range matched {
-		if course.IsFull() {
-			r.logger.Warn(fmt.Sprintf("课程已满: %s", course.Name))
-			continue
-		}
-		attemptable = append(attemptable, course)
-	}
-	if len(attemptable) == 0 {
-		return &EmptyResultError{Kind: EmptyAllFull, Total: courseList.Total, Matched: len(matched)}
+	// 课程列表服务端警告（如"所选类型无开放轮次，已回落"）提示一次
+	if courseList.Warning != "" {
+		r.logger.Warn(fmt.Sprintf("课程列表提示: %s", courseList.Warning))
 	}
 
-	for _, course := range attemptable {
+	// ── 提交策略（2026-09-15 实机结论）────────────────────────────────────
+	// P0 修复：容量以服务端为准，**本地缓存的容量不得用于阻止提交**。
+	//   原逻辑：命中课程全"已满"（IsFull）→ 直接返回 EmptyAllFull（零提交）；
+	//   而容量来自 detailCacheTTL=5min 的缓存 → 有人退课释放名额时仍按旧数据
+	//   跳过 → 必输。实测两门有余量的课 40 分钟内被抢满，印证"照常提交等释放"。
+	// P1 修复：提交名额优先给"详情就绪"的课程（详情每轮仅预取少量，
+	//   短 jxb_id 提交基本被拒）；每轮提交上限 maxSubmitPerRound 次，
+	//   配 roundCursor 游标跨轮轮转，保证所有候选都有机会。
+	ordered := readyCoursesFirst(matched)
+
+	r.mu.Lock()
+	r.roundCursor++
+	cursor := r.roundCursor
+	r.mu.Unlock()
+
+	submitted, rejectedFull := 0, 0
+	for i := 0; i < len(ordered) && submitted < maxSubmitPerRound; i++ {
+		course := ordered[(cursor+i)%len(ordered)]
+
 		if course.Extra == nil {
-			extra, err := r.client.GetClassInfo(course.ID)
+			extra, err := r.client.GetClassInfo(course)
 			if err != nil {
 				// 修复（V3.0 bug）：详情拿不到不再直接 continue 放弃这门课。
 				// 详情接口挂掉不该让整轮选课全废——降级用短 jxb_id 试一次。
@@ -779,11 +806,20 @@ func (r *Robber) robCourse(workerID int) error {
 		}
 
 		r.logger.Info(fmt.Sprintf("Worker %d 尝试选课: %s (%s)", workerID, course.Name, course.Teacher))
+		submitted++
 		if err := r.client.SelectCourse(course); err != nil {
-			if errors.Is(err, client.ErrSelectRetry) {
-				return err // 交由 worker 走"待重试"节奏
+			switch {
+			case errors.Is(err, client.ErrQuotaExceeded):
+				// 门次上限：不是成功、重试无效，直接上交 worker 停止
+				return err
+			case errors.Is(err, client.ErrSelectRetry):
+				// flag=-1：本轮未受理（通常已满）。继续试本轮其他候选 ——
+				// 只代表这一门没余量，其他课可能还有。
+				rejectedFull++
+				r.logger.Info(fmt.Sprintf("Worker %d 本轮未受理: %s - %v", workerID, course.Name, err))
+			default:
+				r.logger.Warn(fmt.Sprintf("选课失败: %s - %v", course.Name, err))
 			}
-			r.logger.Warn(fmt.Sprintf("选课失败: %s - %v", course.Name, err))
 			continue
 		}
 
@@ -791,7 +827,29 @@ func (r *Robber) robCourse(workerID int) error {
 		return nil
 	}
 
+	// 本轮提交全部被"已满/未受理"拒绝 → 保持挂机节奏死等（随时有人退课）
+	if submitted > 0 && rejectedFull == submitted {
+		return &EmptyResultError{Kind: EmptyAllFull, Total: courseList.Total, Matched: len(matched)}
+	}
+
 	return errRoundNoSelection
+}
+
+// readyCoursesFirst 详情就绪（有 do_jxb_id）的课程排前面。
+//
+// 依据：详情每轮仅预取少量，Extra 为空的课程只能用短 jxb_id 提交，
+// 服务端基本会拒；每轮提交上限有限，不筛就可能全打在注定失败的课上。
+func readyCoursesFirst(courses []*model.Course) []*model.Course {
+	ready := make([]*model.Course, 0, len(courses))
+	rest := make([]*model.Course, 0, len(courses))
+	for _, c := range courses {
+		if c.Extra != nil && c.Extra.DoJxbID != "" {
+			ready = append(ready, c)
+		} else {
+			rest = append(rest, c)
+		}
+	}
+	return append(ready, rest...)
 }
 
 // GetLastCourseList 获取最后一次获取的课程列表（用于手动接管）
@@ -816,7 +874,7 @@ func (r *Robber) ManualSelectCourse(course *model.Course) error {
 
 	// 获取课程详情（如果需要）
 	if course.Extra == nil || course.Extra.DoJxbID == "" {
-		extra, err := r.client.GetClassInfo(course.ID)
+		extra, err := r.client.GetClassInfo(course)
 		if err != nil {
 			return fmt.Errorf("获取课程详情失败: %w", err)
 		}
@@ -832,10 +890,23 @@ func (r *Robber) ManualSelectCourse(course *model.Course) error {
 }
 
 // filterCourses 筛选符合配置条件的课程
+//
+// TypeRelaxed 处理（2026-10-12 实机结论）：所选课程类型当前没有开放轮次时，
+// 客户端已回落到教务实际开放的轮次查询（如选了"网课"但本轮只开放
+// kklxdm=11 其他特殊课程）。此时若仍按原 kklxdm 做本地过滤，该轮次所有
+// 课程会被滤掉 → 用户一门课都看不到（死路）。改用"无类型偏好"的配置副本
+// 匹配（其余筛选条件不变），让用户至少能看到并抢到实际开放的课程。
 func (r *Robber) filterCourses(courseList *model.CourseList) []*model.Course {
+	cfg := r.config
+	if courseList != nil && courseList.TypeRelaxed {
+		relaxed := *r.config
+		relaxed.CourseType = "" // Match() 对空类型不过滤
+		cfg = &relaxed
+	}
+
 	matched := make([]*model.Course, 0, len(courseList.Items))
 	for _, course := range courseList.Items {
-		if course.Match(r.config) {
+		if course.Match(cfg) {
 			matched = append(matched, course)
 		}
 	}
@@ -986,7 +1057,7 @@ func (r *Robber) logCourseInfoForManualTakeover() {
 
 	r.logger.Info("───────────────────────────────────────────────────")
 	r.logger.Info("📖 手动选课步骤：")
-	r.logger.Info("   1. 访问: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html")
+	r.logger.Info("   1. 访问: 选课系统「自主选课」页面（/xsxk/zzxkyzb_cxZzxkYzbIndex.html）")
 	r.logger.Info("   2. 登录教务系统")
 	r.logger.Info("   3. 切换到软件的【课程列表】标签页查看详情")
 	r.logger.Info("   4. 根据课程信息在教务系统中搜索并选课")

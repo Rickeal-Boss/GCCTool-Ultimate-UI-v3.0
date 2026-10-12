@@ -22,8 +22,13 @@ import (
 
 // nodeURLMap 节点显示名 → 真实 Base URL 的映射表
 //
-// 外网节点（1-5）均指向 jwxt.gcc.edu.cn HTTPS；
-// 内网节点（6-13）指向校园网内负载均衡地址（明文 HTTP，仅校园网可达）。
+// ⚠️ 隐私说明：本表是工具的**连接目标地址**（教务系统对外服务地址与校园网负载均衡
+// 地址），不含任何账号/学号/会话信息 —— 工具必须知道服务器地址才能发起请求，
+// 删掉本表工具即完全无法联网工作。除此之外，仓库中不保留任何完整的页面 URL、
+// 会话参数（xkkz_xh 等）或抓包上下文（注释/文档/日志/测试均已改为仅记路径）。
+//
+// 外网节点（1-5）均指向教务系统 HTTPS；内网节点（6-13）指向校园网内
+// 负载均衡地址（明文 HTTP，仅校园网可达）。
 var nodeURLMap = map[string]string{
 	// 外网 HTTPS 节点（校外/VPN 均可用，推荐）
 	"节点1（推荐）": "https://jwxt.gcc.edu.cn",
@@ -82,16 +87,24 @@ type Client struct {
 	// 故改用 atomic 消除隐患。
 	isRobbing atomic.Bool
 
-	// mu 保护 selectInitParams
+	// mu 保护 selectInitParams / poolRounds / poolValidUntil
 	mu sync.Mutex
 	// selectInitParams 缓存从"选课首页 / Display 页"提取到的服务端初始化参数
-	// （xkkz_id、rwlx、rlkz、sxbj、cxbj、qz、xklc、xkxnm、xkxqm 等）。
+	// （xkkz_id、rwlx、rlkz、sxbj、cxbj、qz、xklc、xkxnm、xkxqm 等），
+	// 即参数池（paramPoolTTL 内可复用，见 pool.go）。
 	//
 	// 正方 V9 的选课提交接口要求带上这些页面下发的隐藏参数；V3.0 只提交了
 	// kch_id/kcmc/kklxdm/gnmkdm/jxb_ids 五个字段，其余全为空，服务端大概率直接拒绝。
-	// 这里把页面原样下发的参数整体缓存，提交时原样回填，避免硬编码字段名单
-	// （学校换版本时无需改代码）。
+	// ⚠️ 提交时必须按端点白名单过滤（见 whitelist.go）——整包回填会被服务端
+	// 以「系统运行异常」拒绝（2026-09-15 实机对照实验结论）。
 	selectInitParams map[string]string
+
+	// poolRounds 参数池同源的轮次（页签）列表。
+	// 轮次参数必须成组取用（kklxdm/xkkz_id/xkkz_xh/njdm_id/zyh_id），
+	// 混用不同轮次的参数只会得到误导性的「加密串错误」。
+	poolRounds []model.Round
+	// poolValidUntil 参数池复用窗口截止时间（零值 = 已失效）
+	poolValidUntil time.Time
 
 	// categoryOptions 页面下发的"课程归属/课程类别"选项：选项文本 → 选项值
 	// 用于把用户在 UI 勾选的中文分类映射成教务系统真实可用的 kcgs_list 取值。
@@ -118,8 +131,9 @@ func NewClient(nodeURL string) *Client {
 
 	return &Client{
 		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
-			Jar:     jar,
+			Timeout:       15 * time.Second,
+			Jar:           jar,
+			CheckRedirect: safeRedirectPolicy,
 		},
 		baseURL:   getNodeURL(nodeURL),
 		cookieJar: jar,
@@ -152,9 +166,10 @@ func NewClientWithProxy(nodeURL, agentURL string) *Client {
 
 	return &Client{
 		httpClient: &http.Client{
-			Timeout:   15 * time.Second,
-			Jar:       jar,
-			Transport: transport,
+			Timeout:       15 * time.Second,
+			Jar:           jar,
+			Transport:     transport,
+			CheckRedirect: safeRedirectPolicy,
 		},
 		baseURL:   getNodeURL(nodeURL),
 		cookieJar: jar,
@@ -162,6 +177,51 @@ func NewClientWithProxy(nodeURL, agentURL string) *Client {
 		circuitBreaker:  stealth.NewCircuitBreaker("正方教务（代理）"),
 		backoffStrategy: stealth.NewBackoffStrategy(5*time.Second, 60*time.Second, 2.0, true),
 	}
+}
+
+// safeRedirectPolicy 重定向安全策略（2026-09-15 实机安全审查结论）
+//
+// 风险：Go http.Client 默认最多跟随 10 跳、**不限主机**；而 307/308 重定向
+// 会把带请求体的 POST **原样重发**。登录请求体是 RSA 加密的凭据 ——
+// 在明文内网节点（172.22.14.x，本软件自己就弹窗警告的场景）下，同网段
+// 中间人把登录响应改成 307 指向自己主机，就能回收这份加密凭据
+// （HTTP 下 RSA 公钥也可被替换，密码可被还原）。
+//
+// 策略：
+//   - 带体方法（POST/PUT/PATCH）跨主机重定向 → 一律拒绝；
+//   - 同主机重定向 ≤ 3 跳（防循环）；
+//   - GET 跨主机放行（CookieJar 按域隔离，不会外泄 Cookie）。
+func safeRedirectPolicy(req *http.Request, via []*http.Request) error {
+	const maxHops = 10
+	const maxSameHostHops = 3
+	if len(via) >= maxHops {
+		return fmt.Errorf("停止跟随重定向：已超过 %d 跳", maxHops)
+	}
+	if len(via) > 0 && bodyCarryingMethod(req.Method) {
+		first := via[0]
+		if !sameHost(first.URL, req.URL) {
+			return fmt.Errorf("已阻止跨主机重定向(%s): %s → %s（带请求体的方法不跨主机重发）",
+				req.Method, first.URL.Host, req.URL.Host)
+		}
+		if len(via) >= maxSameHostHops {
+			return fmt.Errorf("停止跟随重定向：同主机已超过 %d 跳", maxSameHostHops)
+		}
+	}
+	return nil
+}
+
+// bodyCarryingMethod 可能携带请求体的 HTTP 方法（307/308 会原样重发）
+func bodyCarryingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+		return true
+	}
+	return false
+}
+
+// sameHost 比较两个 URL 的主机（含端口）
+func sameHost(a, b *url.URL) bool {
+	return a.Host == b.Host
 }
 
 // SetDelayProfile 动态调整延迟档位（外部可调用，如即将开抢时切 Aggressive）
@@ -375,7 +435,11 @@ func (c *Client) doGet(rawURL string) (string, error) {
 	// 会话失效的强信号（与 doPost 对齐）：GET 一个正常页面却被 302 到登录页，
 	// 说明 Session 已失效。此前只有 doPost 有此检查，页面链路（选课首页等）
 	// 的会话失效只能表现为"解析失败"或被关键词误报掩盖。
-	if looksLikeLoginPage(bodyStr) {
+	//
+	// ⚠️ 例外：请求的**就是登录页本身**时，返回登录页是正常响应
+	// （Login 第一步就要 GET 登录页）—— 不排除这一步，Login 从第一步起
+	// 就会被自己的会话失效检查判死（曾因此整个登录链路静默失效）。
+	if looksLikeLoginPage(bodyStr) && !isLoginPageURL(rawURL) {
 		c.circuitBreaker.RecordFailure()
 		stealth.Global.Record(stealth.RequestRecord{
 			Timestamp:  time.Now(),
@@ -851,16 +915,10 @@ func (c *Client) DelayProfile() stealth.DelayProfile {
 
 // SetSelectInitParams 缓存选课初始化参数（由 GetClassList 在解析选课首页/Display 页后调用）
 //
+// 语义等同"预热"：写入参数池并开启 90s 复用窗口（见 pool.go）。
 // 内部做一次深拷贝，避免调用方后续修改 map 影响缓存。
 func (c *Client) SetSelectInitParams(params map[string]string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	cp := make(map[string]string, len(params))
-	for k, v := range params {
-		cp[k] = v
-	}
-	c.selectInitParams = cp
+	c.refreshPool(params, nil)
 }
 
 // SelectInitParams 返回选课初始化参数的副本（供选课提交回填）
@@ -948,12 +1006,17 @@ func (c *Client) InvalidateCourseListCache() {
 
 // ClearSessionBoundState 清空与旧会话绑定的全部缓存
 //
-// 登录成功后调用（含自动重登录）：选课初始化参数（xkkz_id 等）与课程列表
-// 都是上一个会话拉取的。若重登录后继续沿用，服务端可能因会话不匹配拒绝
-// 请求，客户端再把失败误判为会话失效 → 再次重登录 → 循环（issue#1 的
-// 放大器之一）。
+// 登录成功后调用（含自动重登录）：选课初始化参数（xkkz_id 等）、轮次列表与
+// 课程列表都是上一个会话拉取的。若重登录后继续沿用，服务端可能因会话不匹配
+// 拒绝请求，客户端再把失败误判为会话失效 → 再次重登录 → 循环（issue#1 的
+// 放大器之一）。三处必须同时清（只清缓存漏参数池 = 旧 xkkz_xh 继续提交
+// 再触发失效，与"重登计数清零"叠加成死循环）。
 func (c *Client) ClearSessionBoundState() {
-	c.SetSelectInitParams(nil)
+	c.mu.Lock()
+	c.selectInitParams = nil
+	c.poolRounds = nil
+	c.poolValidUntil = time.Time{}
+	c.mu.Unlock()
 	c.InvalidateCourseListCache()
 }
 
@@ -968,6 +1031,14 @@ func looksLikeLoginPage(body string) bool {
 		return false
 	}
 	return strings.Contains(lower, `type="password"`) || strings.Contains(lower, `type='password'`)
+}
+
+// isLoginPageURL 判断 URL 是否就是登录页本身
+//
+// 配合 looksLikeLoginPage 使用：请求登录页而拿到登录页 = 正常响应，
+// 只有"请求其他页面却拿到登录页"才说明会话失效。
+func isLoginPageURL(rawURL string) bool {
+	return strings.Contains(rawURL, pathLoginPage)
 }
 
 // buildURL 构建完整URL

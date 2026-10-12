@@ -1,13 +1,19 @@
 // Package stealth - 风控信号检测器
 //
 // 正方系统已知的封号/限流信号清单（实测归纳）：
-//  - 返回 HTTP 429 → 服务端明确限流
-//  - 返回 HTTP 503 → 服务端过载/熔断
-//  - 响应体含 "频繁" / "操作频繁" / "稍后重试" → 业务层限流
-//  - 响应体含 "验证码" / "captcha" → 触发人机验证
-//  - 响应体含 "账号已被锁定" / "账号异常" → 账号封禁
-//  - 响应体含 "login_slogin" / "请重新登录" → Session 失效
-//  - 响应体含 "系统繁忙" / "服务器忙" → 短暂降级重试
+//   - 返回 HTTP 429 → 服务端明确限流
+//   - 返回 HTTP 503 → 服务端过载/熔断
+//   - 响应体含 "操作频繁" / "访问过于频繁" 等用户可读文案 → 业务层限流
+//   - 响应体含用户可读的验证码提示（如"请滑动完成验证"）→ 触发人机验证
+//   - 响应体含 "账号已被锁定" / "账号异常" → 账号封禁
+//   - 响应体含 "请重新登录" / "会话已过期" → Session 失效
+//   - 响应体含 "系统繁忙" / "服务器忙" → 短暂降级重试
+//
+// ⚠️ 2026-10-12 实机误报修复（最大教训）：风控关键词**绝不匹配密文/十六进制串/
+// 框架类名** —— "429" 会命中 right_do_jxb_id（256 位十六进制加密 ID）里的数字
+// 子串（任何带已选课程的页面都有），"captcha" 会命中框架自带 CSS
+// `.captcha_modal`（每页都有）。只认用户可读的中文提示 + HTTP 状态码。
+// （曾把正常页面误判成限流，连错 25 分钟以上；回归测试见 detector_test.go）
 package stealth
 
 import (
@@ -58,10 +64,14 @@ var riskRules = []struct {
 	},
 	{
 		level: RiskCaptcha,
+		// 2026-10-12 实机误报修复：原关键词表里的 "captcha"/"verify"/"imageCode"
+		// 命中的是框架自带 CSS `.captcha_modal{...}`（zftal-ui，每页都有）——
+		// 正常页面会被判成验证码并**直接停止自动化**。
+		// 风控关键词绝不匹配密文/十六进制串/框架类名，只认用户可读的中文提示。
 		keywords: []string{
-			"验证码", "captcha", "请输入验证码",
-			"人机验证", "滑动验证", "点击验证",
-			"verify", "imageCode", "image_code",
+			"请输入验证码", "请完成人机验证", "验证码错误", "验证码不正确",
+			"触发验证码", "请滑动完成验证", "滑动验证", "点击验证",
+			"人机验证", "请先完成验证码", "需要验证码", "系统检测到异常",
 		},
 		message: "系统触发验证码，需要人工介入",
 	},
@@ -89,7 +99,13 @@ var riskRules = []struct {
 			// Anti-Fix-Bug: 移除 "稍后再试"、"稍后重试" 等过于敏感的关键词
 			// 这些词可能出现在普通的登录失败提示、帮助信息中，导致误判
 			// 只保留明确的频率限制提示
-			"429", "操作频繁", "请求频繁", "频繁操作",
+			//
+			// 2026-10-12 实机误报修复：移除裸 "429" —— 它命中的是选课首页
+			// right_do_jxb_id（256 位十六进制**加密**教学班 ID）里的数字子串
+			// （如 `65a1b1f2e68fc52c6fd429475be381f9…`），任何带已选课程的页面
+			// 都有 → 每轮拉列表必被判限流。真限流由 HTTP 状态码 429 分支
+			// + 中文用户可读文案捕获。
+			"操作频繁", "请求频繁", "频繁操作",
 			"too many requests", "rate limit", "slow down", "限流",
 			"请勿频繁", "操作过于频繁", "访问过于频繁",
 		},
@@ -147,16 +163,29 @@ func DetectRisk(httpStatus int, responseBody string, isRobbing bool) *RiskSignal
 			return &RiskSignal{Level: RiskRateLimit, Keyword: "HTTP 429", Message: "服务端明确返回限流状态码"}
 		}
 
-		// 明确的限流文案（只保留误报概率最低的几个）
-		for _, kw := range []string{"操作频繁", "访问过于频繁", "请勿频繁"} {
+		// 明确的限流文案（与完整规则表对齐的低误报子集；
+		// ⚠️ "操作过于频繁" 不是 "操作频繁" 的子串，必须逐条列出）
+		for _, kw := range []string{"操作过于频繁", "操作频繁", "访问过于频繁", "请勿频繁", "请求频繁", "频繁操作"} {
 			if strings.Contains(lower, kw) {
 				return &RiskSignal{Level: RiskRateLimit, Keyword: kw, Message: "触发频率限制，将进行退避等待"}
 			}
 		}
 
-		// 账号封禁 / Session 失效：复用完整规则表（这两类不处理会直接导致空转或封号）
+		// 账号封禁 / Session 失效 / 验证码 / 系统繁忙：复用完整规则表
+		// （这四类不处理会直接导致空转、封号或对着验证码猛刷）。
+		// 修正：V3.x 原实现在抢课模式下跳过验证码与系统繁忙扫描"以维持速度"——
+		// 风控信号本就来自已经拿到的响应体，多做几次 strings.Contains 成本可忽略，
+		// 而漏掉"验证码停止信号"的后果是自动化继续撞墙、加速封号。
 		for _, rule := range riskRules {
-			if rule.level != RiskBanned && rule.level != RiskSessionExpired {
+			switch rule.level {
+			case RiskBanned, RiskSessionExpired, RiskSystemBusy:
+				// 直接扫关键词表
+			case RiskCaptcha:
+				// 先过真实触发门槛（排除框架 CSS/表单元素）
+				if !isRealCaptchaTrigger(lower) {
+					continue
+				}
+			default:
 				continue
 			}
 			for _, kw := range rule.keywords {
@@ -213,88 +242,30 @@ func DetectRisk(httpStatus int, responseBody string, isRobbing bool) *RiskSignal
 	return &RiskSignal{Level: RiskNone}
 }
 
-// isRealCaptchaTrigger 判断是否是真正的验证码触发（而不是正常的验证码 HTML 元素）
+// realCaptchaTriggers 真正的验证码触发文案（用户可读的中文提示）。
 //
-// 说明：
-//   - 登录页 HTML 中包含 `<input name="captcha">`、`<img src="captcha.jpg">` 等元素是正常的
-//   - 这些元素即使验证码当前未显示，也会存在于 HTML 中
-//   - 只有明确的"验证码触发提示"才表示系统要求完成验证码
+// 2026-10-12 实机误报修复的两个要点：
+//  1. **框架类名不是信号**：zftal-ui 每页都带 `<style>.captcha_modal{…}</style>`，
+//     匹配 "captcha" 会把正常页面判成验证码并直接停止自动化；
+//  2. **门槛漏洞**：原实现里"滑动验证/点击验证/人机验证"在规则表 keywords 里，
+//     却不在 isRealCaptchaTrigger 的触发词表里 → 真正的验证码永远打不出来。
+//     现在两边共用同一份触发词表，消除不一致。
+var realCaptchaTriggers = []string{
+	"请输入验证码", "请完成人机验证", "验证码错误", "验证码不正确",
+	"触发验证码", "请滑动完成验证", "滑动验证", "点击验证",
+	"人机验证", "请先完成验证码", "需要验证码", "系统检测到异常",
+}
+
+// isRealCaptchaTrigger 判断是否是真正的验证码触发（而不是正常的验证码 HTML 元素/CSS）
 //
-// 返回值：
-//   - true：真正的验证码触发（需要停止）
-//   - false：正常的验证码 HTML 元素（不需要停止）
+// 只认服务端渲染给用户看的中文提示文案；登录页自带的 `<input name="captcha">`、
+// 框架 `.captcha_modal` 样式、十六进制串都不算。
 func isRealCaptchaTrigger(lowerBody string) bool {
-	// 1. 检查是否是正常的验证码 HTML 元素（排除误报）
-	normalCaptchaPatterns := []string{
-		`<input`,
-		`<img`,
-		`type="text"`,
-		`type='text'`,
-	}
-
-	hasInputTag := false
-	for _, pattern := range normalCaptchaPatterns {
+	for _, pattern := range realCaptchaTriggers {
 		if strings.Contains(lowerBody, pattern) {
-			hasInputTag = true
-			break
+			return true
 		}
 	}
-
-	// 如果包含 input/img 标签，可能是正常的验证码 HTML 元素
-	if hasInputTag {
-		// 进一步检查：如果是验证码相关的 input/img，但只是表单元素，不是触发提示
-		if strings.Contains(lowerBody, `name="captcha"`) || strings.Contains(lowerBody, `name='captcha'`) ||
-			strings.Contains(lowerBody, `id="captcha"`) || strings.Contains(lowerBody, `id='captcha'`) {
-			// 检查是否有明确的触发提示（而不是正常的表单元素）
-			realTriggerPatterns := []string{
-				"请输入验证码才能继续",
-				"请完成人机验证",
-				"验证码错误",
-				"触发验证码",
-				"请滑动完成验证",
-				"请先完成验证码",
-				"验证码不正确",
-				"需要验证码",
-				"系统检测到异常",
-			}
-
-			for _, pattern := range realTriggerPatterns {
-				if strings.Contains(lowerBody, strings.ToLower(pattern)) {
-					return true // 真正的验证码触发
-				}
-			}
-
-			// 没有明确的触发提示，只是正常的验证码 HTML 元素
-			return false
-		}
-	}
-
-	// 2. 检查明确的验证码触发提示（即使没有 input/img 标签）
-	realTriggerPatterns := []string{
-		"请输入验证码才能继续",
-		"请完成人机验证",
-		"验证码错误",
-		"触发验证码",
-		"请滑动完成验证",
-		"请先完成验证码",
-		"验证码不正确",
-		"需要验证码",
-		"系统检测到异常",
-	}
-
-	for _, pattern := range realTriggerPatterns {
-		if strings.Contains(lowerBody, strings.ToLower(pattern)) {
-			return true // 真正的验证码触发
-		}
-	}
-
-	// 既不是正常的验证码 HTML 元素，也没有明确的触发提示
-	// 检查是否包含简单的"验证码"字样（可能是误报）
-	if strings.Contains(lowerBody, "验证码") {
-		// 简单包含"验证码"字样，但不是明确的触发提示 → 误报
-		return false
-	}
-
 	return false
 }
 

@@ -23,7 +23,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // 正方教务系统 V9（广州商学院 jwxt.gcc.edu.cn）接口路径常量
 //
-// 实测路径来源：https://jwxt.gcc.edu.cn 页面结构
+// 实测路径来源：选课系统页面结构（域名见 nodeURLMap，此处只记路径）
 //   - 登录页路径：  /xtgl/login_slogin.html
 //   - 登录提交路径：/xtgl/login_slogin.html  (form action 与登录页同路径，POST)
 //   - 选课模块：    /jwglxt/xsxk/...
@@ -53,11 +53,17 @@ const (
 	pathSelectSubmit = "/xsxk/zzxkyzbjk_xkBcZyZzxkYzb.html"
 
 	// 已选课程查询
-	// 用户实测抓包路径：/xsxk/zzxkyzb_cxZzxkYzbChoosed.html?gnmkdm=N253512
-	pathSelectedCourses = "/xsxk/zzxkyzb_cxZzxkYzbChoosed.html"
+	// 实机抓包修正（2026-09-15）：端点必须是 cxZzxkYzbChoosedDisplay.html。
+	// 原 cxZzxkYzbChoosed.html 不是浏览器实际使用的接口；更早的
+	// cxYxkAndKc.html 被服务端 HTTP 910 拦截。
+	pathSelectedCourses = "/xsxk/zzxkyzb_cxZzxkYzbChoosedDisplay.html"
 
 	// 退课
-	pathCancelCourse = "/xsxk/zzxkyzb_tkZzxkYzb.html"
+	// 实机抓包修正（2026-09-15，站点 JS zzxkYzbChoosedZy.js 的 delCourse()）：
+	// 真端点是 tuikBcZzxkYzb.html —— "tuik"（退课）不是 "tk"！
+	// 原 tkZzxkYzb 服务端明确回「请求的方法 tkZzxkYzb 在对象 ZzxkYzbAction
+	// 中未定义！」+ HTTP 910。
+	pathCancelCourse = "/xsxk/zzxkyzb_tuikBcZzxkYzb.html"
 
 	// 功能模块代码（正方 V9 选课模块固定值，作为 URL Query 参数传递）
 	gnmkdmSelect = "N253512"
@@ -84,7 +90,12 @@ func (c *Client) Login(cfg *model.Config) error {
 		return fmt.Errorf("获取登录页失败: %w", err)
 	}
 
-	// 步骤2：提取登录页所有 hidden input（含 csrftoken 等 CSRF 保护字段）
+	// 步骤2：提取登录页表单字段
+	//
+	// 实机结论（2026-09-11，同校 Efarxs 同款）：**登录只收最小参数体**
+	// csrftoken + language + yhm + mm。带登录页全部隐藏字段反而报
+	// "用户名或密码不正确"——服务端对登录表单做了严格校验。
+	// 因此这里只从页面提取 csrftoken / language，其余隐藏字段一律不带。
 	formData := c.parseLoginForm(pageHTML)
 
 	// 步骤3：获取 RSA 公钥
@@ -108,12 +119,19 @@ func (c *Client) Login(cfg *model.Config) error {
 		return fmt.Errorf("RSA加密密码失败，登录已中止（拒绝明文传输）: %w", err)
 	}
 
-	// 步骤4：提交登录表单
-	formData["yhm"] = cfg.Username
-	formData["mm"] = encryptedPassword
+	// 步骤4：提交登录表单（最小参数体：csrftoken + language + yhm + mm）
+	loginForm := make(map[string]string, 4)
+	if v, ok := formData["csrftoken"]; ok {
+		loginForm["csrftoken"] = v
+	}
+	if v, ok := formData["language"]; ok {
+		loginForm["language"] = v
+	}
+	loginForm["yhm"] = cfg.Username
+	loginForm["mm"] = encryptedPassword
 
 	loginURL := c.buildURL(pathLoginPost)
-	respBody, err := c.doPostWithReferer(loginURL, formData, loginPageURL)
+	respBody, err := c.doPostWithReferer(loginURL, loginForm, loginPageURL)
 	if err != nil {
 		return fmt.Errorf("提交登录表单失败: %w", err)
 	}
@@ -135,11 +153,18 @@ func (c *Client) Login(cfg *model.Config) error {
 	return nil
 }
 
-// checkLoginResponse 检查登录响应中是否包含失败标志
+// checkLoginResponse 检查登录响应中是否包含失败提示
+//
+// 实机结论（2026-09-11）：广州商学院登录失败原文是
+// "用户名或密码不正确，请重新输入！" —— 注意是"不正确"不是"错误"，
+// 早期关键词表只写了"密码错误/用户名或密码错误"，完全匹配不上这条真实文案，
+// 登录失败会被当成"响应正常"继续往下走。
 func checkLoginResponse(body string) error {
 	failKeywords := []string{
 		"账号或密码不正确",
+		"用户名或密码不正确",
 		"用户名或密码错误",
+		"密码不正确",
 		"登录失败",
 		"密码错误",
 		"账号不存在",
@@ -516,11 +541,11 @@ func encryptWithRSA(pubKeyStr, password string) (string, error) {
 //	  3. 明确的 Session 过期提示
 //
 // 参考：广州商学院正方教务系统
-//   - 登录成功主页: https://jwxt.gcc.edu.cn/xtgl/index_initMenu.html
-//   - 自主选课页面: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html
+//   - 登录成功主页: /xtgl/index_initMenu.html
+//   - 自主选课页面: /xsxk/zzxkyzb_cxZzxkYzbIndex.html
 // Anti-Fix-Bug: 使用正确的首页 URL 参数
 // 参考：广州商学院正方教务系统登录成功后的主页
-// https://jwxt.gcc.edu.cn/xtgl/index_initMenu.html?jsdm=xs&_t=时间戳&echarts=1
+// /xtgl/index_initMenu.html?jsdm=xs&_t=<时间戳>&echarts=1
 const pathLoginCheck = "/xtgl/index_initMenu.html"
 
 func (c *Client) checkLoginStatus() error {
@@ -535,8 +560,8 @@ func (c *Client) checkLoginStatus() error {
 	// 问题：简单的字符串匹配会误判（如错误页面包含登录链接）
 	// 解决：结合多个条件判断，并检测成功标志
 	// 参考：广州商学院正方教务系统
-	//   - 登录成功主页: https://jwxt.gcc.edu.cn/xtgl/index_initMenu.html
-	//   - 自主选课页面: https://jwxt.gcc.edu.cn/xsxk/zzxkyzb_cxZzxkYzbIndex.html
+	//   - 登录成功主页: /xtgl/index_initMenu.html
+	//   - 自主选课页面: /xsxk/zzxkyzb_cxZzxkYzbIndex.html
 
 	lowerBody := strings.ToLower(body)
 

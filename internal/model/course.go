@@ -15,7 +15,11 @@ type Course struct {
 	Name   string `json:"kcmc"`
 	Number string `json:"kch"`
 	Credit int    `json:"xf"`
-	Type   string `json:"kklxdm"` // 课程类型代码
+	// CreditRaw 学分的原始字符串形式（如 "2.0"）。
+	// 选课提交的 kcmc 需要按浏览器原样格式回显学分（"(kch)名-2.0学分"），
+	// 只存 int 会丢掉 "2.0" 的小数位。
+	CreditRaw string
+	Type     string `json:"kklxdm"` // 课程类型代码
 
 	// 教学班信息
 	ClassID   string `json:"jxb_id"`
@@ -45,12 +49,27 @@ type CourseExtra struct {
 	// DoJxbID：正方 V9 的加密教学班长 ID，选课时必须使用此值（非短 jxb_id）
 	// 字段名在接口响应中为 do_jxb_id
 	DoJxbID string
+	// Teacher：详情 jsxx 解析出的教师名（课程列表接口不返回教师名，
+	// 教师只在详情里 —— 实机 288/288 门课无 jsm/jsxx 字段）
+	Teacher string
+	// Capacity / Selected：详情下发的容量与已选人数（jxbrl / jxbrs）。
+	// 容量以服务端实时值为准，本地缓存不得用于阻止提交。
+	Capacity  int
+	Selected  int
 }
 
 // CourseList 课程列表
 type CourseList struct {
 	Total int
 	Items []*Course
+
+	// Warning 服务端返回课程但存在需要用户知晓的偏差时给出说明
+	//（如"所选课程类型当前无开放轮次，已回落到教务实际开放的轮次"）。
+	Warning string
+	// TypeRelaxed 本次查询未按配置的课程类型过滤（回落到了其他开放轮次）。
+	// robber 据此用"无类型偏好"的配置副本做本地匹配，避免把该轮次全部课程
+	// 滤掉导致用户一门课都看不到（死路）。
+	TypeRelaxed bool
 }
 
 // Clone 拷贝课程列表（Course 按值复制，Extra 指针置空）
@@ -63,8 +82,10 @@ func (cl *CourseList) Clone() *CourseList {
 		return nil
 	}
 	out := &CourseList{
-		Total: cl.Total,
-		Items: make([]*Course, 0, len(cl.Items)),
+		Total:       cl.Total,
+		Items:       make([]*Course, 0, len(cl.Items)),
+		Warning:     cl.Warning,
+		TypeRelaxed: cl.TypeRelaxed,
 	}
 	for _, c := range cl.Items {
 		if c == nil {
@@ -81,21 +102,27 @@ func (cl *CourseList) Clone() *CourseList {
 //
 // 课程类型比较使用 model 层的统一映射：cfg.CourseType 允许是中文标签或英文代码，
 // 内部一律归一化为规范代码后再比较，避免"展示值当业务值"导致过滤失效。
+//
+// 两条兜底（防坑守则 #1：过滤/匹配必须对数据缺失兜底，未知不过滤）：
+//  1. cfg.CourseType 为空 → 不做类型过滤（TypeRelaxed 回落场景）；
+//  2. c.Type 为空 → 课程数据缺类型字段，不过滤（避免因字段缺失滤掉全部课）。
 func (c *Course) Match(cfg *Config) bool {
 	// 检查课程类型
-	switch NormalizeCourseType(cfg.CourseType) {
-	case CourseTypeOnline:
-		if c.Type != CourseTypeCodeKklxdm(CourseTypeOnline) {
-			return false
-		}
-	case CourseTypePE:
-		if c.Type != CourseTypeCodeKklxdm(CourseTypePE) {
-			return false
-		}
-	case CourseTypeNormal:
-		// 普通课：排除网课与体育课对应的类别码
-		if c.Type == CourseTypeCodeKklxdm(CourseTypeOnline) || c.Type == CourseTypeCodeKklxdm(CourseTypePE) {
-			return false
+	if cfg.CourseType != "" && c.Type != "" {
+		switch NormalizeCourseType(cfg.CourseType) {
+		case CourseTypeOnline:
+			if c.Type != CourseTypeCodeKklxdm(CourseTypeOnline) {
+				return false
+			}
+		case CourseTypePE:
+			if c.Type != CourseTypeCodeKklxdm(CourseTypePE) {
+				return false
+			}
+		case CourseTypeNormal:
+			// 普通课：排除网课与体育课对应的类别码
+			if c.Type == CourseTypeCodeKklxdm(CourseTypeOnline) || c.Type == CourseTypeCodeKklxdm(CourseTypePE) {
+				return false
+			}
 		}
 	}
 
@@ -104,8 +131,13 @@ func (c *Course) Match(cfg *Config) bool {
 		return false
 	}
 
-	// 检查老师（精确匹配）
-	if cfg.TeacherName != "" && c.Teacher != cfg.TeacherName {
+	// 检查老师（包含匹配）
+	// 修复（V3.0 bug）：原实现是精确匹配（c.Teacher != cfg.TeacherName），
+	// 而课程列表接口根本不返回教师名（教师只在详情 jsxx 里），用户填了教师
+	// 筛选就会把全部课程静默滤掉。现在：列表无教师字段时不过滤；
+	// 有教师字段时按包含匹配（"测试教师" 能命中 "测试教师 讲师" 这类展示值）。
+	if cfg.TeacherName != "" && c.Teacher != "" &&
+		!strings.Contains(strings.ToLower(c.Teacher), strings.ToLower(cfg.TeacherName)) {
 		return false
 	}
 
@@ -129,6 +161,85 @@ func (c *Course) IsFull() bool {
 		return false
 	}
 	return c.Selected >= c.Capacity
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 教师名解析（详情 jsxx 字段）
+//
+// 实机抓包结论（2026-09-15）：jsxx 有三种共存格式，原实现三种全错：
+//   - "70010/教务处/无"      （网课，教务处开课）→ 正确解析为 ""（无教师）
+//   - "20000001/测试教师/讲师"（主修课）        → 正确解析为 "测试教师"
+//   - "20000002/测试教师乙/无"（职称缺失）      → 正确解析为 "测试教师乙"
+// 判别规则：第 3 段是职称 → 取第 2 段；第 3 段为空/"无" → 看第 2 段是否
+// 单位词（处/学院/中心…），是单位词则无教师，否则是姓名。
+// 兼容 2 段格式（工号/姓名）：取最后一段。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// teacherTitleKeywords 职称关键词（命中即认为该段是职称而非姓名）
+var teacherTitleKeywords = []string{
+	"教授", "讲师", "助教", "工程师", "实验师", "教练", "研究员",
+	"导师", "教师", "技师", "医师", "馆员", "编审", "记者", "正高", "副高",
+}
+
+// orgNameKeywords 单位词关键词（命中即认为该段是开课单位而非教师姓名）
+var orgNameKeywords = []string{
+	"处", "学院", "中心", "部", "系", "组", "室", "园", "校区", "办公室", "联盟",
+}
+
+// ParseTeacherFromJsxx 从课程详情的 jsxx 字段解析教师名。
+// 解析不出教师名（网课/教务处开课）时返回空字符串 —— 这是正确业务结果，
+// 调用方不得把空字符串当作"解析失败"。
+func ParseTeacherFromJsxx(jsxx string) string {
+	s := strings.TrimSpace(jsxx)
+	if s == "" || s == "无" || s == "null" {
+		return ""
+	}
+
+	parts := strings.Split(s, "/")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+
+	switch {
+	case len(parts) >= 3:
+		// 三段：[工号/姓名/职称]
+		name, title := parts[1], parts[2]
+		if containsAnyKeyword(title, teacherTitleKeywords) {
+			return name // 第 3 段是职称 → 第 2 段是姓名
+		}
+		if looksLikeOrgName(name) {
+			return "" // 教务处开课的网课：无教师
+		}
+		return name
+	case len(parts) == 2:
+		// 两段：[工号/姓名]，取最后一段
+		last := parts[1]
+		if looksLikeOrgName(last) {
+			return ""
+		}
+		return last
+	default:
+		// 单段：可能直接就是姓名
+		if looksLikeOrgName(s) {
+			return ""
+		}
+		return s
+	}
+}
+
+// containsAnyKeyword s 包含任一词表关键词则为 true
+func containsAnyKeyword(s string, keywords []string) bool {
+	for _, kw := range keywords {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeOrgName s 看起来是开课单位（而非教师姓名）则为 true
+func looksLikeOrgName(s string) bool {
+	return s != "" && containsAnyKeyword(s, orgNameKeywords)
 }
 
 // String 格式化课程信息
@@ -271,6 +382,9 @@ func buildCourseFromMap(item map[string]interface{}) *Course {
 	}
 	if v, ok := ToString(item["kch"]); ok {
 		course.Number = v
+	}
+	if v, ok := ToString(item["xf"]); ok {
+		course.CreditRaw = v
 	}
 	if v, ok := ToInt(item["xf"]); ok {
 		course.Credit = v

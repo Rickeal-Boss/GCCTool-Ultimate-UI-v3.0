@@ -65,7 +65,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
           cache: false
 
       - name: Cache Go modules
@@ -170,7 +170,7 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            ## GCC选课助手 V3.0
+            ## GCC选课助手
 
             ### 📦 下载
 
@@ -187,7 +187,7 @@ jobs:
             2. 运行程序：
                - Windows: 双击 `gcc_helper.exe`
                - macOS/Linux: 在终端运行 `./gcc_helper`
-            3. 详细使用说明请查看 `README.md` 和 `QUICKSTART.md`
+            3. 详细使用说明请查看仓库根目录的 `README.md`
 
             ### 🐛 Debug版本
 
@@ -205,6 +205,6 @@ jobs:
 
             ### 📝 更新日志
 
-            查看 CHANGELOG_V3.md 了解详细更新内容
+            本次更新内容见下方自动生成的变更记录（Commits）。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

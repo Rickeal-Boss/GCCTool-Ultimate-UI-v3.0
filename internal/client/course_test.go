@@ -135,16 +135,49 @@ func TestBuildCourseQueryParams(t *testing.T) {
 		CourseType: "体育课", // 中文也应归一化
 		Categories: map[string]bool{"科技类": true},
 	}
-	p := c.buildCourseQueryParams(map[string]string{"xkkz_id": "XK"}, cfg)
+	// 参数池按端点白名单取字段；轮次整组参数（kklxdm/xkkz_xh）由调用方给出
+	round := model.Round{Kklxdm: "20", XkkzXh: "HEX-XH", NjdmID: "2023", ZyhID: "0801"}
+	p := c.buildCourseQueryParams(map[string]string{"xkkz_id": "XK", "junk_param": "不应出现在请求里"}, round, cfg)
 
 	if p["kklxdm"] != "20" {
 		t.Errorf("kklxdm = %q, want 20（中文「体育课」应映射为 20）", p["kklxdm"])
 	}
-	if p["kcgs_list"] != "01" {
-		t.Errorf("kcgs_list = %q, want 01", p["kcgs_list"])
+	if p["kcgs_list[0]"] != "01" {
+		t.Errorf("kcgs_list[0] = %q, want 01（浏览器多选为下标格式）", p["kcgs_list[0]"])
 	}
 	if p["xkkz_id"] != "XK" {
-		t.Errorf("基础参数应被保留, got %q", p["xkkz_id"])
+		t.Errorf("白名单内的基础参数应被保留, got %q", p["xkkz_id"])
+	}
+	if p["xkkz_xh"] != "HEX-XH" {
+		t.Errorf("xkkz_xh 必须随轮次整组带上（PartDisplay 必需）, got %q", p["xkkz_xh"])
+	}
+	if _, exists := p["junk_param"]; exists {
+		t.Error("白名单外的字段不得进入课程查询请求（整包发送会被服务端拒绝）")
+	}
+}
+
+// TestBuildCourseQueryParams_WhitelistOnly 锁定"表单只提交自己 form 的字段"：
+// 整包参数池（含登录页/导航等其它 form 的隐藏字段）会被服务端以
+// 「系统运行异常」拒绝（2026-09-15 实机对照实验）。
+func TestBuildCourseQueryParams_WhitelistOnly(t *testing.T) {
+	c := newTestClient()
+	pool := map[string]string{
+		"xkkz_id": "XK", "kklxdm": "10", "xkxnm": "2026", "xkxqm": "1",
+		"rwlx": "1", "rlkz": "1", "njdm_id": "2023", "zyh_id": "0801",
+		// 以下为页面全集里存在、但不属于列表查询表单的字段
+		"csrftoken": "LOGIN-FORM-TOKEN", "language": "zh_CN",
+		"iskxk": "1", "sfkxk": "1", "firstKklxdm": "10", "firstXkkzXh": "HEX",
+	}
+	round := model.Round{Kklxdm: "11", XkkzXh: "HEX2"}
+	p := c.buildCourseQueryParams(pool, round, &model.Config{CourseType: "普通课"})
+
+	for _, forbidden := range []string{"csrftoken", "language", "iskxk", "sfkxk", "firstKklxdm", "firstXkkzXh"} {
+		if _, exists := p[forbidden]; exists {
+			t.Errorf("字段 %q 不在列表查询白名单，不得出现在请求中", forbidden)
+		}
+	}
+	if p["kklxdm"] != "11" || p["xkkz_xh"] != "HEX2" {
+		t.Errorf("轮次整组参数应覆盖池中旧值: kklxdm=%q xkkz_xh=%q", p["kklxdm"], p["xkkz_xh"])
 	}
 }
 

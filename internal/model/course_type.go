@@ -40,7 +40,7 @@ var courseTypeCodeToLabel = map[string]string{
 	CourseTypeNormal: "普通课",
 }
 
-// courseTypeCodeToKklxdm 规范代码 → 正方查询参数 kklxdm
+// courseTypeCodeToKklxdm 规范代码 → 正方查询参数 kklxdm（单值，兼容旧调用方）
 //
 // ⚠️ 注意：kklxdm 是学校自配的课程类别代码，10/20/30 是当前部署的取值。
 // 若学校调整了类别代码，只需修改此表（V3.0 中该映射散落在 client 包里，
@@ -49,6 +49,26 @@ var courseTypeCodeToKklxdm = map[string]string{
 	CourseTypeOnline: "10",
 	CourseTypePE:     "20",
 	CourseTypeNormal: "30",
+}
+
+// courseTypeCodeToKklxdmCandidates 规范代码 → 正方 kklxdm 候选表（按优先级排序）
+//
+// 实机抓包修正（2026-09-15）：普通课（各学院开课、有上课时间/地点）实机
+// 主修课程 kklxdm=**01**，原单值表里的 "30" 是历史猜测；同时教务开放轮次的
+// kklxdm 每学期会变（2026-09 第8轮=10 通识选修课；2026-10 第1轮=11 其他特殊
+// 课程，有上课时间/地点，属普通课范畴但代码是 11，不在任何候选表里）。
+// → 单值硬编码不可靠，改为候选表：命中当前开放轮次才用，都不命中则由调用方
+//   回落首个开放轮次并显式告警（CourseList.TypeRelaxed/Warning）。
+var courseTypeCodeToKklxdmCandidates = map[string][]string{
+	CourseTypeOnline: {"10"},
+	CourseTypePE:     {"20"},
+	CourseTypeNormal: {"01", "30"},
+}
+
+// CourseTypeKklxdmCandidates 规范代码 → 正方 kklxdm 候选表（副本）
+func CourseTypeKklxdmCandidates(code string) []string {
+	cands := courseTypeCodeToKklxdmCandidates[NormalizeCourseType(code)]
+	return append([]string(nil), cands...)
 }
 
 // CourseTypeLabels 返回 UI 展示用的课程类型标签（副本，防止调用方意外修改）
