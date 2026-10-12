@@ -139,7 +139,25 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
         run: go build -v -ldflags="-s -w" -o ${{ matrix.output_debug }} .
 
-      - name: Create release archive
+      # Windows 打包：必须用 PowerShell 的 Compress-Archive。
+      # 踩过的坑：① Git Bash 不自带 zip（exit 127）；② 7z.exe 是 Windows 程序，
+      # 读不懂 Git Bash 的 POSIX 路径（/d/a/...），传入后找不到文件。
+      - name: Create release archive (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $PWD "release"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "${{ matrix.output }}"       $dir -Force
+          Copy-Item "${{ matrix.output_debug }}" $dir -Force
+          if (Test-Path README.md) { Copy-Item README.md $dir -Force }
+          $name = "gcc_helper_${{ matrix.goos }}_${{ matrix.arch }}.zip"
+          Compress-Archive -Path (Join-Path $dir "*") -DestinationPath $name -Force
+          Get-Item $name | Select-Object Name, Length
+
+      # macOS / Linux 打包：tar（两者都自带）
+      - name: Create release archive (macOS/Linux)
+        if: matrix.goos != 'windows'
         shell: bash
         run: |
           ARCHIVE_DIR="$(pwd)/release"
@@ -147,20 +165,9 @@ jobs:
           cp "${{ matrix.output }}"       "$ARCHIVE_DIR/"
           cp "${{ matrix.output_debug }}" "$ARCHIVE_DIR/"
           cp README.md "$ARCHIVE_DIR/" || true
-
           ARCHIVE_NAME="gcc_helper_${{ matrix.goos }}_${{ matrix.arch }}"
-
-          # ⚠️ Windows runner 的 bash 是 Git Bash，**不自带 zip**（旧写法 exit 127）。
-          # 用 runner 预装的 7-Zip 打包；macOS/Linux 用 tar（两者都自带）。
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            SEVEN_ZIP="/c/Program Files/7-Zip/7z.exe"
-            [ -x "$SEVEN_ZIP" ] || SEVEN_ZIP="7z"
-            "$SEVEN_ZIP" a -tzip "${ARCHIVE_NAME}.zip" "$ARCHIVE_DIR/*" >/dev/null
-            ls -l "${ARCHIVE_NAME}.zip"
-          else
-            tar -czf "${ARCHIVE_NAME}.tar.gz" -C "$ARCHIVE_DIR" .
-            ls -l "${ARCHIVE_NAME}.tar.gz"
-          fi
+          tar -czf "${ARCHIVE_NAME}.tar.gz" -C "$ARCHIVE_DIR" .
+          ls -l "${ARCHIVE_NAME}.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
