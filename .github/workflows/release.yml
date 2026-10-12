@@ -148,6 +148,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    # 仓库默认 workflow token 为只读（default_workflow_permissions=read），
+    # 不显式声明该 job 会因 403 无法创建 Release。这里只为发布 job 升权，
+    # 构建 job 保持默认只读（最小权限）。
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
