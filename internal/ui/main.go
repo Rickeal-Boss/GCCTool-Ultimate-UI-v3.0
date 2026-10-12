@@ -702,7 +702,7 @@ func (a *App) exportCourseInfo() {
 	}
 
 	sb.WriteString("=== 手动选课指引 ===\n")
-	sb.WriteString("1. 访问: /xsxk/zzxkyzb_cxZzxkYzbIndex.html?gnmkdm=N253512&layout=default\n")
+	sb.WriteString("1. 访问: 选课系统「自主选课」页面\n")
 	sb.WriteString("2. 登录教务系统\n")
 	sb.WriteString("3. 根据上述课程信息搜索并选择课程\n")
 	sb.WriteString("4. 点击选课按钮完成选课\n")

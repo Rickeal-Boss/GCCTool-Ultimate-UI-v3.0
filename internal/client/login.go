@@ -545,7 +545,7 @@ func encryptWithRSA(pubKeyStr, password string) (string, error) {
 //   - 自主选课页面: /xsxk/zzxkyzb_cxZzxkYzbIndex.html
 // Anti-Fix-Bug: 使用正确的首页 URL 参数
 // 参考：广州商学院正方教务系统登录成功后的主页
-// /xtgl/index_initMenu.html?jsdm=xs&_t=<时间戳>&echarts=1
+// /xtgl/index_initMenu.html（带 jsdm / _t / echarts 查询参数）
 const pathLoginCheck = "/xtgl/index_initMenu.html"
 
 func (c *Client) checkLoginStatus() error {
