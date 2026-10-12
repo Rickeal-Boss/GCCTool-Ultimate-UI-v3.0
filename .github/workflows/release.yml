@@ -25,8 +25,10 @@ jobs:
             ldflags: "-s -w -H windowsgui"
             cgo: "1"
 
-          # macOS Intel (amd64) — macos-13 是 Intel runner
-          - runner: macos-13
+          # macOS Intel (amd64) — macos-13 (Intel runner) 已进入退役、排队数十分钟不分配，
+          # 改为在 arm64 runner 上交叉编译（Fyne 官方支持的 clang -arch x86_64 方式，
+          # 见下方 "Configure cross-compile" 步骤写入 CC/CGO_CFLAGS/CGO_LDFLAGS）。
+          - runner: macos-latest
             os: macos
             arch: amd64
             goos: darwin
@@ -36,7 +38,7 @@ jobs:
             ldflags: "-s -w"
             cgo: "1"
 
-          # macOS Apple Silicon (arm64) — macos-latest / macos-14 是 M1 runner
+          # macOS Apple Silicon (arm64)
           - runner: macos-latest
             os: macos
             arch: arm64
@@ -47,7 +49,8 @@ jobs:
             ldflags: "-s -w"
             cgo: "1"
 
-          # Linux amd64 — Fyne 在 Linux CI 上用 CGO=0 headless 构建
+          # Linux amd64 — Fyne 是 CGO GUI 框架，必须 CGO_ENABLED=1 + 安装 GL/X11 开发库，
+          # 否则 go-gl 的 C 文件被 build constraints 排除，构建必失败（历史 v* 标签因此从没出过 Linux 包）
           - runner: ubuntu-latest
             os: linux
             arch: amd64
@@ -56,7 +59,7 @@ jobs:
             output: gcc_helper_linux
             output_debug: gcc_helper_debug_linux
             ldflags: "-s -w"
-            cgo: "0"
+            cgo: "1"
 
     steps:
       - name: Checkout code
@@ -95,14 +98,32 @@ jobs:
         if: matrix.goos == 'darwin'
         run: |
           brew update --preinstall || true
-          brew install pkg-config glfw
+          brew install pkg-config || true
           # 确认 Xcode CLT 可用
           xcode-select --print-path || xcode-select --install || true
 
+      # macOS Intel 交叉编译：在 arm64 runner 上产出 x86_64 二进制
+      # （Fyne/go-gl 的 C 代码由 clang 按 -arch 重新编译，需同时给 CFAGS/LDFLAGS）
+      - name: Configure cross-compile (macOS Intel on arm64 runner)
+        if: matrix.goos == 'darwin' && matrix.arch == 'amd64'
+        run: |
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CGO_CFLAGS=-arch x86_64" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-arch x86_64" >> "$GITHUB_ENV"
+
       # ------------------------------------------------------------------ Linux
-      # Linux 使用 CGO_ENABLED=0，无需 GL 依赖
-      # 但若将来需要 CGO，需要安装 libgl-dev / libxcursor-dev 等
+      # Fyne 在 Linux 上通过 CGO 链接 OpenGL/X11 —— 必须安装开发库，
+      # 否则构建报 "build constraints exclude all Go files"（go-gl）。
       # ------------------------------------------------------------------ Linux
+      - name: Install Linux build dependencies (Fyne CGO)
+        if: matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            xorg-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxrandr-dev libxcursor-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev
 
       - name: Build release binary
         env:
@@ -129,10 +150,16 @@ jobs:
 
           ARCHIVE_NAME="gcc_helper_${{ matrix.goos }}_${{ matrix.arch }}"
 
+          # ⚠️ Windows runner 的 bash 是 Git Bash，**不自带 zip**（旧写法 exit 127）。
+          # 用 runner 预装的 7-Zip 打包；macOS/Linux 用 tar（两者都自带）。
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            cd "$ARCHIVE_DIR" && zip -r "$(pwd)/../${ARCHIVE_NAME}.zip" . && cd ..
+            SEVEN_ZIP="/c/Program Files/7-Zip/7z.exe"
+            [ -x "$SEVEN_ZIP" ] || SEVEN_ZIP="7z"
+            "$SEVEN_ZIP" a -tzip "${ARCHIVE_NAME}.zip" "$ARCHIVE_DIR/*" >/dev/null
+            ls -l "${ARCHIVE_NAME}.zip"
           else
             tar -czf "${ARCHIVE_NAME}.tar.gz" -C "$ARCHIVE_DIR" .
+            ls -l "${ARCHIVE_NAME}.tar.gz"
           fi
 
       - name: Upload artifact
@@ -146,13 +173,15 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # 任一平台构建失败也不阻塞发布：用已有产物建 Release（下载不到产物会自然失败，
+    # 不会产生空 Release）。避免"一个平台挂了 → 整包发不出去"。
+    if: always() && startsWith(github.ref, 'refs/tags/')
     # 仓库默认 workflow token 为只读（default_workflow_permissions=read），
     # 不显式声明该 job 会因 403 无法创建 Release。这里只为发布 job 升权，
     # 构建 job 保持默认只读（最小权限）。
     permissions:
       contents: write
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
